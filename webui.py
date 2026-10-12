@@ -237,7 +237,8 @@ def stream_reply(user_text, api_key, model, mock):
         yield f"[Connection error to the AI API{detail}]"
         return
     try:
-        for line in resp.iter_lines(decode_unicode=True):
+        for raw_line in resp.iter_lines():
+            line = raw_line.decode("utf-8", errors="ignore") if isinstance(raw_line, bytes) else raw_line
             if not line or not line.startswith("data: "):
                 continue
             data = line[len("data: "):]
@@ -272,7 +273,7 @@ def chat():
         return Response("Say something first.", mimetype="text/plain")
     return Response(
         stream_reply(text, app.config["API_KEY"], app.config["MODEL"], app.config["MOCK"]),
-        mimetype="text/plain",
+        mimetype="text/plain; charset=utf-8",
     )
 
 
