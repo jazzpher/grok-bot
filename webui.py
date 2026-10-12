@@ -26,6 +26,9 @@ except ImportError:
 API_URL = os.environ.get("GROK_API_URL", "https://api.x.ai/v1/chat/completions")
 DEFAULT_MODEL = os.environ.get("GROK_MODEL", "grok-4-fast")
 
+# Tried in order when a model is rejected (e.g. retired by the provider).
+FALLBACK_MODELS = ["gemini-flash-latest", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+
 SYSTEM_PROMPT = (
     "You are Grok, a helpful assistant with a bit of wit. "
     "Answer directly and honestly."
@@ -171,6 +174,32 @@ inp.addEventListener('keydown', e => {
 app = Flask(__name__)
 state = {"history": [{"role": "system", "content": SYSTEM_PROMPT}]}
 
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+
+
+def save_settings():
+    data = {k: state[k] for k in ("key_override", "url_override", "model_override") if k in state}
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(data, f)
+        os.chmod(SETTINGS_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def load_settings():
+    try:
+        with open(SETTINGS_FILE) as f:
+            data = json.load(f)
+        for k in ("key_override", "url_override", "model_override"):
+            if data.get(k):
+                state[k] = data[k]
+    except (OSError, ValueError):
+        pass
+
+
+load_settings()
+
 
 def stream_reply(user_text, api_key, model, mock):
     """Yield reply text chunks as they arrive, and remember the exchange."""
@@ -186,12 +215,28 @@ def stream_reply(user_text, api_key, model, mock):
     api_key = state.get("key_override") or api_key
     model = state.get("model_override") or model
     api_url = state.get("url_override") or API_URL
-    payload = {"model": model, "messages": state["history"], "stream": True}
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    candidates = [model] + [m for m in FALLBACK_MODELS if m != model]
     chunks = []
+    resp = None
+    last_status = None
+    for candidate in candidates:
+        payload = {"model": candidate, "messages": state["history"], "stream": True}
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        try:
+            resp = requests.post(api_url, headers=headers, json=payload, stream=True, timeout=180)
+            resp.raise_for_status()
+            model = candidate
+            break
+        except requests.RequestException as e:
+            last_status = getattr(e.response, "status_code", None) if e.response is not None else None
+            if hasattr(resp, "close"):
+                resp.close()
+            resp = None
+    if resp is None:
+        detail = f" (HTTP {last_status})" if last_status else ""
+        yield f"[Connection error to the AI API{detail}]"
+        return
     try:
-        resp = requests.post(api_url, headers=headers, json=payload, stream=True, timeout=180)
-        resp.raise_for_status()
         for line in resp.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data: "):
                 continue
@@ -206,10 +251,8 @@ def stream_reply(user_text, api_key, model, mock):
             if text:
                 chunks.append(text)
                 yield text
-    except requests.RequestException as e:
-        status = getattr(e.response, "status_code", None) if e.response is not None else None
-        detail = f" (HTTP {status})" if status else ""
-        yield f"[Connection error to the Grok API{detail}]"
+    except requests.RequestException:
+        pass
     finally:
         if hasattr(resp, "close"):
             resp.close()
@@ -245,21 +288,25 @@ def set_key():
         key = m.group(0)
     if key:
         state["key_override"] = key
-        is_gem = key.startswith("AIza") or key.startswith("AQ.")
-        if url:
-            state["url_override"] = url
-        elif is_gem:
-            state["url_override"] = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-        if model:
-            state["model_override"] = model
-        elif is_gem and not state.get("model_override"):
-            state["model_override"] = "gemini-2.0-flash"
+    is_gem = key.startswith("AIza") or key.startswith("AQ.")
+    if url:
+        state["url_override"] = url
+    elif key and is_gem:
+        state["url_override"] = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    if model:
+        state["model_override"] = model
+    elif key and is_gem and not state.get("model_override"):
+        state["model_override"] = "gemini-flash-latest"
+    if key:
         if is_gem:
             msg = "saved: Gemini key detected, endpoint and model auto-set"
         else:
             msg = "saved key, but no API URL set. Fill the API URL field for non-Gemini keys."
+    elif url or model:
+        msg = "saved endpoint/model settings"
     else:
         msg = "no key found in the field. Paste the full key (starts with AIza) then Save."
+    save_settings()
     return Response(msg, mimetype="text/plain")
 
 
