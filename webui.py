@@ -146,12 +146,13 @@ function toggleSettings() {
 }
 
 async function saveKey() {
-  await fetch('/set_key', {
+  const saveRes = await fetch('/set_key', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({key: keyin.value, url: urlin.value, model: modelin.value})
   });
-  document.getElementById('keystatus').textContent = 'saved (server memory only)';
+  const st = await saveRes.text();
+  document.getElementById('keystatus').textContent = st;
   keyin.value = '';
 }
 
@@ -238,6 +239,10 @@ def set_key():
     key = (d.get("key") or "").strip()
     url = (d.get("url") or "").strip()
     model = (d.get("model") or "").strip()
+    import re
+    m = re.search(r"AIza[0-9A-Za-z_\-]{30,}", key)
+    if m:
+        key = m.group(0)
     if key:
         state["key_override"] = key
         if url:
@@ -248,7 +253,26 @@ def set_key():
             state["model_override"] = model
         elif key.startswith("AIza") and not state.get("model_override"):
             state["model_override"] = "gemini-2.0-flash"
-    return Response("saved", mimetype="text/plain")
+        if key.startswith("AIza"):
+            msg = "saved: Gemini key detected, endpoint and model auto-set"
+        else:
+            msg = "saved key, but no API URL set. Fill the API URL field for non-Gemini keys."
+    else:
+        msg = "no key found in the field. Paste the full key (starts with AIza) then Save."
+    return Response(msg, mimetype="text/plain")
+
+
+@app.route("/debug", methods=["GET"])
+def debug_state():
+    key = state.get("key_override", "")
+    return Response(json.dumps({
+        "key_set": bool(key),
+        "key_prefix": key[:4] + "..." if key else "",
+        "url_override": state.get("url_override", ""),
+        "model_override": state.get("model_override", ""),
+        "default_url": API_URL,
+        "default_model": app.config.get("MODEL", ""),
+    }), mimetype="application/json")
 
 
 @app.route("/clear", methods=["POST"])
