@@ -45,3 +45,16 @@ Optional: choose a model with `--model grok-4-fast` or by setting
 - `/save` save this conversation to a text file
 - `/help` list commands
 - `/exit` quit
+
+## Using Gemini (free, AI Studio) instead of Grok
+
+Gemini has an OpenAI-compatible endpoint, so you can plug it in without changing any code:
+
+```bash
+export GROK_API_KEY="your-gemini-api-key"
+export GROK_API_URL="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+export GROK_MODEL="gemini-2.0-flash"
+python webui.py
+```
+
+Then open http://127.0.0.1:5000. You can swap GROK_MODEL for any Gemini model (e.g. gemini-2.5-flash).
