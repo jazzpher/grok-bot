@@ -127,30 +127,34 @@ class Workspace:
             source = self.path(action.get('source_path'))
             if not source.is_file() or source.stat().st_size > 32000:
                 raise ToolError('Source missing or exceeds 32 KB.')
-            return self.execute({'action': 'write_file', 'path': action.get('path'),
-                                 'content': source.read_text(encoding='utf-8')})
+            return self._write_bytes(action.get('path'), source.read_bytes())
         if kind == 'write_file':
-            if pathlib.Path(str(action.get('path', ''))).parts[:1] == ('uploads',) and not allow_upload:
-                raise ToolError('Uploaded documents are read-only. Write a separate output file.')
-            path = self.path(action.get('path'))
             content = action.get('content')
-            if not isinstance(content, str) or len(content.encode('utf-8')) > 32000:
+            if not isinstance(content, str):
                 raise ToolError('Text files are limited to 32 KB.')
-            current = list(self.root.rglob('*'))
-            if not path.exists() and sum(p.is_file() for p in current) >= 25:
-                raise ToolError('Workspace file limit reached (25).')
-            used = sum(p.stat().st_size for p in current if p.is_file() and not p.is_symlink())
-            old = path.stat().st_size if path.is_file() else 0
-            if used - old + len(content.encode('utf-8')) > 256000:
-                raise ToolError('Workspace storage limit reached (256 KB).')
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding='utf-8')
-            path.chmod(0o600)
-            name = str(path.relative_to(self.root))
-            self.written.add(name)
-            self.checked.discard(name)
-            return 'Wrote ' + name + '. Read it back before finishing.'
+            return self._write_bytes(action.get('path'), content.encode('utf-8'), allow_upload)
         raise ToolError('Unsupported action. No shell or network tools are available.')
+
+    def _write_bytes(self, name, content, allow_upload=False):
+        if pathlib.Path(str(name)).parts[:1] == ('uploads',) and not allow_upload:
+            raise ToolError('Uploaded documents are read-only. Write a separate output file.')
+        path = self.path(name)
+        if len(content) > 32000:
+            raise ToolError('Text files are limited to 32 KB.')
+        current = list(self.root.rglob('*'))
+        if not path.exists() and sum(p.is_file() for p in current) >= 25:
+            raise ToolError('Workspace file limit reached (25).')
+        used = sum(p.stat().st_size for p in current if p.is_file() and not p.is_symlink())
+        old = path.stat().st_size if path.is_file() else 0
+        if used - old + len(content) > 256000:
+            raise ToolError('Workspace storage limit reached (256 KB).')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        path.chmod(0o600)
+        name = str(path.relative_to(self.root))
+        self.written.add(name)
+        self.checked.discard(name)
+        return 'Wrote ' + name + '. Read it back before finishing.'
 
 
 def parse_action(text):
@@ -178,17 +182,34 @@ def run_loop(goal, history, workspace, call_model, stopped, max_steps=12):
     past = [m for m in history if m.get('role') != 'system'][-12:]
     messages = [{'role': 'system', 'content': context_rules + '\n' + RULES}, *past,
                 {'role': 'user', 'content': goal}]
-    # Explicit exact-copy requests involving one named uploaded document get a
-    # deterministic completion check. Other transformations are not byte copies.
-    exact_source = None
-    if re.search(r'\bexact(?:ly)?\b', goal, re.I):
-        uploads = [p for p in workspace.root.glob('uploads/*') if p.is_file()
-                   and (p.name in goal or p.name.removesuffix('.txt') in goal
-                        or re.sub(r'^\d+-', '', p.name.removesuffix('.txt')) in goal)]
-        if len(uploads) == 1:
-            exact_source = uploads[0]
-    task_written = set()
-    attempts = {}
+    # A deliberately narrow exact-copy grammar supplies explicit evidence.
+    # Unsupported wording asks for paths rather than guessing an artifact.
+    exact_requested = bool(re.search(r'\bcopy\b', goal, re.I)
+                           and re.search(r'\bexact(?:ly)?\b', goal, re.I))
+    exact_source = exact_target = None
+    if exact_requested:
+        match = re.fullmatch(r'\s*copy\s+([\w./-]+)\s+exact(?:ly)?\s+to\s+([\w./-]+)\s*', goal, re.I)
+        try:
+            if not match:
+                raise ToolError('Use: Copy SOURCE exactly to TARGET (workspace paths).')
+            source_name, target_name = match.groups()
+            source = workspace.path(source_name)
+            if not source.is_file():
+                uploads = [p for p in workspace.root.glob('uploads/*') if p.is_file()
+                           and source_name in (p.name, p.name.removesuffix('.txt'),
+                               re.sub(r'^\d+-', '', p.name.removesuffix('.txt')))]
+                if len(uploads) != 1:
+                    raise ToolError('Name one existing source workspace path.')
+                source = workspace.path(str(uploads[0].relative_to(workspace.root)))
+            target = workspace.path(target_name)
+            if source == target or target.relative_to(workspace.root).parts[:1] == ('uploads',):
+                raise ToolError('Name a separate, writable target path outside uploads/.')
+            exact_source, exact_target = source, target
+        except (ToolError, OSError) as exc:
+            yield {'type': 'blocked', 'text': 'Exact-copy paths need clarification: ' + str(exc), 'step': 0}
+            return
+    failure_signature = None
+    failure_count = 0
     for step in range(1, max_steps + 1):
         if stopped():
             yield {'type': 'stopped', 'text': 'Stopped by you.', 'step': step}
@@ -216,12 +237,19 @@ def run_loop(goal, history, workspace, call_model, stopped, max_steps=12):
                 messages.append({'role': 'user', 'content': 'Read and check these written files first: ' + ', '.join(sorted(workspace.written - workspace.checked))})
                 yield {'type': 'check', 'text': 'Checking written files before completion.', 'step': step}
                 continue
-            if kind == 'done' and exact_source and task_written:
-                mismatches = [name for name in sorted(task_written)
-                              if workspace.path(name).read_bytes() != exact_source.read_bytes()]
-                if mismatches:
-                    messages.append({'role': 'user', 'content': 'Exact-copy verification FAILED for: ' + ', '.join(mismatches) + '. Use copy_file from ' + str(exact_source.relative_to(workspace.root)) + ', read the output back, and compare_files. Do not claim a match.'})
-                    yield {'type': 'check', 'text': 'Exact-copy verification failed. Output differs from source; not complete.', 'step': step}
+            if kind == 'done' and exact_source:
+                source_name = str(exact_source.relative_to(workspace.root))
+                target_name = str(exact_target.relative_to(workspace.root))
+                try:
+                    # Revalidate paths and bounds on every completion candidate.
+                    result = workspace.execute({'action': 'compare_files',
+                                                'source_path': source_name, 'path': target_name})
+                    matches = result.startswith('MATCH:')
+                except (ToolError, OSError) as exc:
+                    matches = False
+                if not matches:
+                    messages.append({'role': 'user', 'content': 'Exact-copy verification FAILED. Expected ' + target_name + ' to exist and match ' + source_name + '. Use copy_file, read the output back, and compare_files. Do not claim a match.'})
+                    yield {'type': 'check', 'text': 'Exact-copy verification failed for ' + target_name + '. Missing or different from ' + source_name + '; not complete.', 'step': step}
                     continue
             text = action.get('text')
             if not isinstance(text, str) or not text.strip():
@@ -233,17 +261,21 @@ def run_loop(goal, history, workspace, call_model, stopped, max_steps=12):
             yield {'type': 'plan', 'text': str(action.get('text', ''))[:2000], 'step': step}
             messages.append({'role': 'user', 'content': 'Now take the next action.'})
             continue
-        signature = json.dumps(action, sort_keys=True)
-        attempts[signature] = attempts.get(signature, 0) + 1
-        if attempts[signature] > 2:
-            yield {'type': 'blocked', 'text': 'Stopped a repeated action loop. Refine the task or supply missing information.', 'step': step}
+        signature = json.dumps({'action': kind, **{f: action[f] for f in ACTION_FIELDS[kind]}}, sort_keys=True)
+        if signature == failure_signature and failure_count >= 2:
+            yield {'type': 'blocked', 'text': 'Stopped a repeated failed action loop. Refine the task or supply missing information.', 'step': step}
             return
         try:
             output = workspace.execute(action)
-            if kind in ('write_file', 'copy_file'):
-                task_written.add(str(workspace.path(action.get('path')).relative_to(workspace.root)))
+            if kind == 'compare_files' and output.startswith('MISMATCH:'):
+                failure_count = failure_count + 1 if signature == failure_signature else 1
+                failure_signature = signature
+            else:
+                failure_signature, failure_count = None, 0
             kind_out = 'tool'
         except (ToolError, OSError, UnicodeError) as exc:
+            failure_count = failure_count + 1 if signature == failure_signature else 1
+            failure_signature = signature
             output = 'Tool error: ' + str(exc)
             kind_out = 'error'
         label = kind + (': ' + action['path'] if isinstance(action.get('path'), str) else '')

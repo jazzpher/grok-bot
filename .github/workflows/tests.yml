@@ -9,5 +9,5 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r requirements.txt
-      - run: python -m unittest -v test_agent
+      - run: python -m unittest discover -v
       - run: python -m py_compile webui.py agent_loop.py bot.py
