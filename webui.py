@@ -245,15 +245,16 @@ def set_key():
         key = m.group(0)
     if key:
         state["key_override"] = key
+        is_gem = key.startswith("AIza") or key.startswith("AQ.")
         if url:
             state["url_override"] = url
-        elif key.startswith("AIza"):
+        elif is_gem:
             state["url_override"] = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
         if model:
             state["model_override"] = model
-        elif key.startswith("AIza") and not state.get("model_override"):
+        elif is_gem and not state.get("model_override"):
             state["model_override"] = "gemini-2.0-flash"
-        if key.startswith("AIza"):
+        if is_gem:
             msg = "saved: Gemini key detected, endpoint and model auto-set"
         else:
             msg = "saved key, but no API URL set. Fill the API URL field for non-Gemini keys."
