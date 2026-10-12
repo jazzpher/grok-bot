@@ -113,3 +113,8 @@ hardened document sandbox; use trusted files and keep dependencies updated.
 Reload now restores the last 24 conversation entries from this session.
 A server restart still loses conversation memory and sessions. Files on disk
 are not automatically reassigned to new sessions. No cross-device history yet.
+
+Exact copies can use copy_file and compare_files to preserve and compare bytes.
+A task asking for an exact copy of one named uploaded document cannot finish
+with output bytes different from that source. This guard is intentionally
+limited to exact-copy tasks, not summaries or other transformations.
