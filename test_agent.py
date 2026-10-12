@@ -20,6 +20,25 @@ class LoopTests(unittest.TestCase):
         self.assertEqual(events[-1]['type'], 'done')
         self.assertIn('check', [e['type'] for e in events])
         self.assertEqual((Path(self.tmp.name)/'hello.txt').read_text(), 'Hello ₱')
+    def test_copy_compare_unicode(self):
+        self.workspace.execute({'action':'write_file','path':'uploads/proof.txt.txt','content':'Budget: ₱391\n'}, allow_upload=True)
+        self.workspace.execute({'action':'copy_file','source_path':'uploads/proof.txt.txt','path':'status.txt'})
+        self.assertEqual(self.workspace.execute({'action':'compare_files','source_path':'uploads/proof.txt.txt','path':'status.txt'}), 'MATCH: exact bytes are identical.')
+        with self.assertRaises(ToolError): self.workspace.execute({'action':'copy_file','source_path':'status.txt','path':'uploads/bad.txt'})
+    def test_exact_copy_false_done_rejected_and_repaired(self):
+        self.workspace.execute({'action':'write_file','path':'uploads/proof.txt.txt','content':'Budget: ₱391\n'}, allow_upload=True)
+        actions=iter([{'action':'read_file','path':'uploads/proof.txt.txt'}, {'action':'write_file','path':'status.txt','content':'Budget: ‱391\n'},
+            {'action':'read_file','path':'status.txt'},{'action':'done','text':'Matches!'},
+            {'action':'copy_file','source_path':'uploads/proof.txt.txt','path':'status.txt'},
+            {'action':'read_file','path':'status.txt'}, {'action':'compare_files','source_path':'uploads/proof.txt.txt','path':'status.txt'},
+            {'action':'done','text':'Copied and compared.'}])
+        events=list(run_loop('Copy proof.txt exactly to status.txt',[],self.workspace,lambda _:json.dumps(next(actions)),lambda:False))
+        self.assertEqual(events[-1]['type'],'done')
+        self.assertTrue(any('verification failed' in e['text'] for e in events))
+        self.assertEqual((Path(self.tmp.name)/'status.txt').read_text(),'Budget: ₱391\n')
+    def test_compare_mismatch(self):
+        for name,content in [('a','₱'),('b','‱')]: self.workspace.execute({'action':'write_file','path':name,'content':content})
+        self.assertIn('MISMATCH',self.workspace.execute({'action':'compare_files','source_path':'a','path':'b'}))
     def test_blocked(self):
         self.assertEqual(self.run_actions([{'action':'need_input','text':'No browser tool.'}])[-1]['type'],'blocked')
     def test_repeat(self):
