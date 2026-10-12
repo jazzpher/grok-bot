@@ -43,8 +43,7 @@ proof that every possible goal is met. Review generated content.
 Files are limited to 25 per session, 32 KB per file and 256 KB total. Paths
 cannot escape the workspace. Existing files in that workspace can be
 replaced by a task. Download important results. New chat clears only your
-conversation, not workspace files. Reloading clears the visible transcript
-but retains server-side session memory. A restart resets conversations and
+conversation, not workspace files. Reload restores the last 24 visible messages in this session. A restart resets conversations and
 sessions; existing workspace folders stay on disk. Remove unused folders
 manually when the app is stopped. This demo is not a multi-user service.
 
@@ -96,3 +95,21 @@ calculator restrictions, HTTP endpoints, auth and session isolation. For a
 real Gemini smoke test, run the example task above with your own configured
 free-tier key. --mock remains available for testing Chat without a key;
 Task mode reports that it needs a real key rather than faking completion.
+
+## Uploads and visible history (next slice)
+
+Upload UTF-8 text/code, CSV/JSON, text PDFs or DOCX (1 MB, 20 PDF pages,
+32 KB extracted text). Images, scanned PDFs/OCR, encrypted PDFs and larger
+files are not supported. Originals are not kept: extracted text goes into a
+read-only uploads/ workspace path. Repeated filenames get a suffix instead
+of overwriting. Tasks can read the full extracted file; ordinary Chat receives
+up to 12000 characters of document excerpts and must disclose incomplete context.
+
+Only upload documents you want sent to the configured AI provider. Uploaded
+content is untrusted data, not permission to run instructions embedded in it.
+The app has no external-action tools. PDF/DOCX parsing is bounded but not a
+hardened document sandbox; use trusted files and keep dependencies updated.
+
+Reload now restores the last 24 conversation entries from this session.
+A server restart still loses conversation memory and sessions. Files on disk
+are not automatically reassigned to new sessions. No cross-device history yet.
