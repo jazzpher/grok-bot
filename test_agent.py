@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from agent_loop import Workspace, ToolError, calculate, run_loop
+from agent_loop import Workspace, ToolError, calculate, run_loop, parse_action, ACTION_SCHEMA
 import webui
 
 class LoopTests(unittest.TestCase):
@@ -39,6 +39,32 @@ class LoopTests(unittest.TestCase):
     def test_compare_mismatch(self):
         for name,content in [('a','₱'),('b','‱')]: self.workspace.execute({'action':'write_file','path':name,'content':content})
         self.assertIn('MISMATCH',self.workspace.execute({'action':'compare_files','source_path':'a','path':'b'}))
+    def test_action_required_arguments(self):
+        from agent_loop import ACTION_FIELDS
+        for kind, fields in ACTION_FIELDS.items():
+            for field in fields:
+                action={'action':kind, **{f:'value' for f in fields}}
+                del action[field]
+                with self.subTest(kind=kind, field=field):
+                    with self.assertRaises(ToolError): parse_action(json.dumps(action))
+        for action in [{'action':'copy_file','path':'target','source_path':''},
+                       {'action':'read_file','path':17}, {'action':'plan','text':'  '},
+                       {'action':'bogus'}]:
+            with self.assertRaises(ToolError): parse_action(json.dumps(action))
+        self.assertEqual(parse_action('{"action":"write_file","path":"empty.txt","content":""}')['content'],'')
+    def test_missing_copy_argument_no_tool_and_recovers(self):
+        self.workspace.execute({'action':'write_file','path':'source','content':'₱391'})
+        self.workspace.checked.add('source')
+        events=self.run_actions([{'action':'copy_file'},
+            {'action':'copy_file','source_path':'source','path':'target'},
+            {'action':'read_file','path':'target'}, {'action':'done','text':'Checked.'}])
+        self.assertEqual(events[-1]['type'],'done')
+        self.assertEqual(events[1]['type'],'error')
+        self.assertEqual((Path(self.tmp.name)/'target').read_text(),'₱391')
+    def test_schema_all_argument_fields_required(self):
+        self.assertEqual(set(ACTION_SCHEMA['required']),set(ACTION_SCHEMA['properties']))
+        self.assertFalse(ACTION_SCHEMA['additionalProperties'])
+        self.assertIn('source_path',ACTION_SCHEMA['required'])
     def test_blocked(self):
         self.assertEqual(self.run_actions([{'action':'need_input','text':'No browser tool.'}])[-1]['type'],'blocked')
     def test_repeat(self):
