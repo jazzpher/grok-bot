@@ -73,7 +73,7 @@ class Workspace:
             raise ToolError('Path must stay inside this workspace.')
         return resolved
 
-    def execute(self, action):
+    def execute(self, action, allow_upload=False):
         kind = action.get('action')
         if kind == 'calculate':
             return str(calculate(action.get('expression')))
@@ -89,6 +89,8 @@ class Workspace:
             self.checked.add(str(path.relative_to(self.root)))
             return content
         if kind == 'write_file':
+            if pathlib.Path(str(action.get('path', ''))).parts[:1] == ('uploads',) and not allow_upload:
+                raise ToolError('Uploaded documents are read-only. Write a separate output file.')
             path = self.path(action.get('path'))
             content = action.get('content')
             if not isinstance(content, str) or len(content.encode('utf-8')) > 32000:
@@ -122,7 +124,11 @@ def parse_action(text):
 
 def run_loop(goal, history, workspace, call_model, stopped, max_steps=12):
     """Yield public progress, not hidden reasoning. Each model call costs a step."""
-    messages = [{'role': 'system', 'content': RULES}, *history[-12:],
+    # One system message avoids provider-dependent precedence between task rules
+    # and document-context safety notes. Task protocol remains the final authority.
+    context_rules = '\n'.join(m['content'] for m in history if m.get('role') == 'system')
+    past = [m for m in history if m.get('role') != 'system'][-12:]
+    messages = [{'role': 'system', 'content': context_rules + '\n' + RULES}, *past,
                 {'role': 'user', 'content': goal}]
     attempts = {}
     for step in range(1, max_steps + 1):
@@ -133,11 +139,14 @@ def run_loop(goal, history, workspace, call_model, stopped, max_steps=12):
         try:
             action = parse_action(call_model(messages))
         except (ValueError, ToolError) as exc:
-            messages.append({'role': 'user', 'content': 'Invalid action JSON. Return one valid action object.'})
+            messages.append({'role': 'user', 'content': 'Invalid action JSON. Include an action field with one of: plan, calculate, list_files, read_file, write_file, done, need_input. Example: {"action":"read_file","path":"uploads/example.txt"}.'})
             yield {'type': 'error', 'text': 'Invalid action response; retrying within the step budget.', 'step': step}
             continue
-        except Exception:
-            yield {'type': 'blocked', 'text': 'Provider request failed. Check your key, model or quota, then try again.', 'step': step}
+        except Exception as exc:
+            response = getattr(exc, 'response', None)
+            status = getattr(response, 'status_code', None)
+            detail = f' (HTTP {status})' if status else ''
+            yield {'type': 'blocked', 'text': 'Provider request failed' + detail + '. Check your key, model or quota, then try again.', 'step': step}
             return
         if stopped():
             yield {'type': 'stopped', 'text': 'Stopped by you.', 'step': step}
