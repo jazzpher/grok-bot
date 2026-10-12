@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 import requests
 from flask import Flask, Response, request, render_template_string, session, redirect, send_file
-from agent_loop import Workspace, run_loop
+from agent_loop import ACTION_SCHEMA, Workspace, run_loop
 from documents import extract_text, MAX_UPLOAD
 from werkzeug.utils import secure_filename
 
@@ -314,7 +314,7 @@ def model_reply(messages, cfg, stream=False, structured=False):
         raise ValueError('Unsupported provider URL.')
     payload = {'model': model, 'messages': messages, 'stream': stream}
     if structured:
-        payload['response_format'] = {'type': 'json_schema', 'json_schema': {'name': 'task_action', 'strict': True, 'schema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['plan','calculate','list_files','read_file','write_file','copy_file','compare_files','done','need_input']}, 'text': {'type': 'string'}, 'path': {'type': 'string'}, 'source_path': {'type': 'string'}, 'content': {'type': 'string'}, 'expression': {'type': 'string'}}, 'required': ['action'], 'additionalProperties': False}}}
+        payload['response_format'] = {'type': 'json_schema', 'json_schema': {'name': 'task_action', 'strict': True, 'schema': ACTION_SCHEMA}}
     res = requests.post(url, headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'},
                         json=payload,
                         stream=stream, timeout=(10, 45))
