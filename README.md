@@ -1,32 +1,45 @@
 # grok-bot
 
-A lightweight local chat app with the same core experience as the Grok bot:
-you chat, it remembers the conversation, replies stream in live.
+A local chat app with the same core experience as the Grok bot: a web chat
+interface, live-streaming replies, and conversation memory.
 
 It uses the official xAI (Grok) API, so replies come from Grok itself.
+Made for low-end devices: it is two small Python files, no heavy stack.
 
 ## Setup (one time)
 
 1. Get an API key at https://console.x.ai (the API is a paid service).
-2. Install the one dependency: `pip3 install requests`
+2. Install dependencies: `pip3 install -r requirements.txt`
 3. Set your key: `export GROK_API_KEY="xai-..."`
 
 ## Run it
+
+Web interface (recommended):
+
+```
+python3 webui.py
+```
+
+Then open http://127.0.0.1:5000 in your browser. Use "New chat" to clear
+the conversation memory. Pick a port with `--port 8080`.
+
+Terminal version (no browser needed):
 
 ```
 python3 bot.py
 ```
 
-Test without a key (fake replies, good for checking the app works):
+Test without a key (fake replies, good for checking things work):
 
 ```
+python3 webui.py --mock
 python3 bot.py --mock
 ```
 
-Optional: pick a model with `python3 bot.py --model grok-4-fast` or by
-setting `GROK_MODEL` in your environment.
+Optional: choose a model with `--model grok-4-fast` or by setting
+`GROK_MODEL` in your environment.
 
-## Commands
+## Commands (terminal version)
 
 - `/new` clear memory and start a fresh conversation
 - `/save` save this conversation to a text file
