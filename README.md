@@ -118,3 +118,8 @@ Exact copies can use copy_file and compare_files to preserve and compare bytes.
 A task asking for an exact copy of one named uploaded document cannot finish
 with output bytes different from that source. This guard is intentionally
 limited to exact-copy tasks, not summaries or other transformations.
+
+Structured replies require every argument field (empty strings for unused fields).
+Action-specific server validation rejects missing, blank or wrong-type arguments
+before a tool executes, and supplies the exact correction within the step budget.
+Empty write_file content remains valid. Live provider behavior still needs testing.
