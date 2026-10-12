@@ -27,7 +27,7 @@ try:
 except ImportError:
     sys.exit("Missing dependency. Run: pip3 install requests")
 
-API_URL = "https://api.x.ai/v1/chat/completions"
+API_URL = os.environ.get("GROK_API_URL", "https://api.x.ai/v1/chat/completions")
 DEFAULT_MODEL = os.environ.get("GROK_MODEL", "grok-4-fast")
 
 SYSTEM_PROMPT = (
