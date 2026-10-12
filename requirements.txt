@@ -1,2 +1,4 @@
 requests
 flask
+pypdf>=6.0,<7
+defusedxml>=0.7,<1
