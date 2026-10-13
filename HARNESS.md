@@ -24,8 +24,10 @@ the checks JSON field, for example:
 Only `file_text` (exact UTF-8 bytes) and `exact_copy` (`source_path`, `path`, current
 bounded byte equality) are supported. Unsupported check types return 400. Without
 an explicit check a proposed completion becomes `needs_input`, not a claim of
-success. Adding/changing criteria requires a new task; Resume is for clarification
-or interruption, not changing the acceptance contract. Read-back is required for
+success. If the original checks are empty, enter nonempty checks JSON and click
+Resume to establish the contract once. Checks are validated exactly as at admission
+and persisted with the resumed checkpoint; existing nonempty checks cannot change
+(use a new task). Resume never resets budgets. Read-back is required for
 files written by this task, but it is **not** general semantic verification.
 Existing artifacts may satisfy a check without a new write. Checks verify present
 content, not authorship, quality, correctness of arbitrary calculations, or an
@@ -107,12 +109,14 @@ request: the configured connect/read timeout bounds ordinary waits, but Python
 threads and an adversarial slow-drip provider are not hard wall-clock sandboxes.
 No token-price/currency billing estimator is claimed.
 
-Run **one Linux server process**. A stdlib `fcntl` database lock refuses a second
-process; no Gunicorn multiworker, Flask reloader or network-filesystem database.
-Use local disk, threaded serving, restrictive filesystem permissions, and never
-mount the data directory as public static files. Database/lock mode is 0600.
-Windows support, migration from future incompatible schemas, distributed queueing,
-hard process sandboxing and automatic workspace GC are not included.
+Run **one server process**. Unix uses stdlib `fcntl.flock`; Windows uses
+`msvcrt.locking` on the first lock-file byte. Both refuse a second owner; closing
+the handle releases ownership. No Gunicorn multiworker, Flask reloader or
+network-filesystem database. Use local disk and threaded serving. Unix database
+and lock mode is 0600; on Windows restrict the data directory with Windows ACLs.
+Linux execution and simulated Windows lock/import behavior are tested; native
+Windows execution has not been verified. Migration from future incompatible
+schemas, distributed queues, hard sandboxing and automatic workspace GC are absent.
 
 For any tunnel/proxy use exposed mode, strong `GROK_APP_PASSWORD`, stable secret,
 HTTPS/secure cookies as documented in README. Local-only authentication safeguards

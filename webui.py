@@ -93,7 +93,7 @@ PAGE = r"""<!doctype html>
 <button id="stop" onclick="stopTask()" disabled>Stop</button>
 <button onclick="resumeTask()">Resume selected task</button>
 <select id="taskselect" aria-label="Saved task"></select>
-<input id="checks" placeholder='Optional checks JSON: [{"type":"file_text","path":"out.txt","text":"hello"}]' style="max-width:360px;width:100%">
+<input id="checks" aria-label="Artifact checks JSON" placeholder='Checks JSON (also Resume if missing): [{"type":"file_text","path":"out.txt","text":"hello"}]' style="max-width:360px;width:100%">
 <button onclick="showFiles()">Workspace files</button>
 <label style="background:#1c2026;padding:4px 8px;border-radius:6px;cursor:pointer;display:flex;gap:6px;align-items:center">Upload file<input id="upload" type="file" style="max-width:160px" aria-label="Upload document" accept=".txt,.md,.csv,.json,.py,.js,.html,.css,.pdf,.docx" onchange="uploadFile(this)"></label>
 <span id="status" role="status" aria-live="polite">Ready</span>
@@ -170,21 +170,51 @@ async function stopTask() {
 
 let activeTask = null;
 const watching = new Set();
+const taskViews = new Map();
+function taskBubble(id, bubble) {
+  let view = taskViews.get(id);
+  if (!view || view.bubble.isConnected === false) {
+    view = {bubble: bubble || add('grok', 'Saved task\n'), after: 0};
+    taskViews.set(id, view);
+  }
+  return view;
+}
+async function showSelectedTask() {
+  const id = document.getElementById('taskselect').value;
+  if (id) await watchTask(id, taskBubble(id).bubble);
+}
+document.getElementById('taskselect').addEventListener('change', showSelectedTask);
 async function watchTask(id, bubble) {
   if (watching.has(id)) return;
+  const view = taskBubble(id, bubble); bubble = view.bubble;
   watching.add(id); activeTask = id;
-  let after = 0;
+  let after = view.after;
   try {
     for (;;) {
       const er = await fetch('/tasks/' + id + '/events?after=' + after);
       if (!er.ok) throw new Error('Could not load task events');
       const events = await er.json();
-      for (const e of events) { after = e.seq; if (e.type !== 'progress') bubble.textContent += '[' + e.type + '] ' + e.text + '\n'; }
+      for (const e of events) { if (e.seq <= after) continue; after = view.after = e.seq; if (e.type !== 'progress') bubble.textContent += '[' + e.type + '] ' + e.text + '\n'; }
       const sr = await fetch('/tasks/' + id); if (!sr.ok) throw new Error('Could not load task status');
       const row = await sr.json();
       document.getElementById('status').textContent = row.status + ' · step ' + row.steps;
       document.getElementById('stop').disabled = !['queued','running'].includes(row.status);
-      if (!['queued','running'].includes(row.status) && events.length < 200) break;
+      if (!['queued','running'].includes(row.status)) {
+        // Status may have committed after the preceding events request.
+        // Drain only after observing terminal state, using the same cursor.
+        for (;;) {
+          const finalRes = await fetch('/tasks/' + id + '/events?after=' + after);
+          if (!finalRes.ok) throw new Error('Could not load final task events');
+          const finalEvents = await finalRes.json();
+          for (const e of finalEvents) {
+            if (e.seq <= after) continue;
+            after = view.after = e.seq;
+            if (e.type !== 'progress') bubble.textContent += '[' + e.type + '] ' + e.text + '\n';
+          }
+          if (finalEvents.length < 200) break;
+        }
+        break;
+      }
       await new Promise(resolve => setTimeout(resolve, 500));
     }
   } finally { watching.delete(id); await restoreTasks(false); }
@@ -192,20 +222,30 @@ async function watchTask(id, bubble) {
 async function restoreTasks(watch = true) {
   try {
     const res = await fetch('/tasks'); if (!res.ok) return;
-    const rows = await res.json(); const select = document.getElementById('taskselect'); select.replaceChildren();
+    const rows = await res.json(); const select = document.getElementById('taskselect');
+    const selected = select.value; select.replaceChildren();
     for (const row of rows) {
       const option = document.createElement('option'); option.value = row.id;
       option.textContent = row.status + ': ' + row.goal.slice(0, 60); select.appendChild(option);
-      if (watch && ['queued','running'].includes(row.status)) watchTask(row.id, add('grok', 'Restored task\n')).catch(e => add('grok', e.message));
+    }
+    if (rows.some(row => row.id === selected)) select.value = selected;
+    if (watch) {
+      for (const row of rows.filter(row => ['queued','running'].includes(row.status))) {
+        watchTask(row.id, taskBubble(row.id).bubble).catch(e => add('grok', e.message));
+      }
+      await showSelectedTask();
     }
   } catch (e) { document.getElementById('status').textContent = e.message; }
 }
 async function resumeTask() {
   const id = document.getElementById('taskselect').value; if (!id) return;
   const answer = inp.value.trim();
-  const res = await fetch('/tasks/' + id + '/resume', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({answer})});
-  if (!res.ok) { document.getElementById('status').textContent = await res.text(); return; }
-  inp.value = ''; watchTask(id, add('grok', 'Resumed task\n')).catch(e => add('grok', e.message));
+  try {
+    const checksText = document.getElementById('checks').value.trim();
+    const res = await fetch('/tasks/' + id + '/resume', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({answer, ...(checksText ? {checks: JSON.parse(checksText)} : {})})});
+    if (!res.ok) { document.getElementById('status').textContent = await res.text(); return; }
+    inp.value = ''; watchTask(id, taskBubble(id).bubble).catch(e => add('grok', e.message));
+  } catch (e) { document.getElementById('status').textContent = 'Resume failed: ' + e.message; }
 }
 restoreTasks();
 
@@ -532,9 +572,11 @@ def task_resume(tid):
     c = client()
     if not c['busy'].acquire(False): return {'error': 'Session busy'}, 409
     try:
-        if not manager.resume(tid, sid, task_provider(), data.get('answer', '')):
+        if not manager.resume(tid, sid, task_provider(), data.get('answer', ''), checks=data.get('checks')):
             return {'error': 'Task not resumable or session busy; budgets are not reset.'}, 409
         return {'id': tid, 'status': 'queued'}, 202
+    except (ValueError, OSError) as exc:
+        return {'error': str(exc)}, 400
     finally: c['busy'].release()
 
 @app.route('/stop', methods=['POST'])

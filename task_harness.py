@@ -8,7 +8,11 @@ import sqlite3
 import threading
 import time
 import requests
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Windows: lock the first byte, never silently skip exclusivity.
+    fcntl = None
+    import msvcrt
 import hashlib
 
 from agent_loop import RULES, ACTION_FIELDS, Workspace, ToolError, parse_action
@@ -23,10 +27,17 @@ class TaskManager:
         self.database = pathlib.Path(database)
         self.database.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.workspaces = pathlib.Path(workspaces)
-        self.process_lock = open(str(self.database) + '.lock', 'a')
+        self.process_lock = open(str(self.database) + '.lock', 'a+b')
         os.chmod(self.process_lock.name, 0o600)
         try:
-            fcntl.flock(self.process_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if fcntl is not None:
+                fcntl.flock(self.process_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                self.process_lock.seek(0, os.SEEK_END)
+                if self.process_lock.tell() == 0:
+                    self.process_lock.write(b'\0'); self.process_lock.flush()
+                self.process_lock.seek(0)
+                msvcrt.locking(self.process_lock.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError:
             self.process_lock.close()
             raise RuntimeError('Task database already owned by another server. Use one process.') from None
@@ -92,12 +103,13 @@ class TaskManager:
             return [dict(json.loads(p), seq=s) for s, p in self.db.execute(
                 'SELECT seq,payload FROM events WHERE task=? AND seq>? ORDER BY seq LIMIT 200', (tid, after))]
 
-    def save(self, tid, status, state, event):
+    def save(self, tid, status, state, event, additional_events=()):
         with self.lock, self.db:
             self.db.execute('UPDATE tasks SET status=?,state=?,updated=? WHERE id=?',
                             (status, json.dumps(state), time.time(), tid))
-            self.db.execute('INSERT INTO events(task,payload) VALUES(?,?)',
-                            (tid, json.dumps(event)))
+            for payload in (event, *additional_events):
+                self.db.execute('INSERT INTO events(task,payload) VALUES(?,?)',
+                                (tid, json.dumps(payload)))
 
     def busy(self, owner):
         with self.lock:
@@ -167,17 +179,27 @@ class TaskManager:
             self.stops[tid].set()
             return True
 
-    def resume(self, tid, owner, call_model, answer=''):
+    def resume(self, tid, owner, call_model, answer='', checks=None):
         with self.lock:
             row = self.get(tid, owner)
             thread = self.threads.get(tid)
             if (self.closed or not row or row['status'] not in RESUMABLE or self.busy(owner)
                     or (thread and thread.is_alive()) or sum(t.is_alive() for t in self.threads.values()) >= 4):
                 return False
+            if checks is not None:
+                self.validate_checks(checks, Workspace(self.workspaces / owner))
+                if row['checks'] and checks != row['checks']:
+                    raise ValueError('Existing checks are immutable; start a new task to change them.')
+                if not row['checks'] and not checks:
+                    raise ValueError('Supply nonempty file_text or exact_copy checks in the checks field.')
             state = row['state']
             if answer:
                 state['messages'].append({'role': 'user', 'content': answer})
-            self.save(tid, 'queued', state, {'type': 'status', 'text': 'Resuming existing trajectory'})
+            with self.db:
+                if checks is not None and not row['checks']:
+                    self.db.execute('UPDATE tasks SET checks=? WHERE id=? AND owner=?',
+                                    (json.dumps(checks), tid, owner))
+                self.save(tid, 'queued', state, {'type': 'status', 'text': 'Resuming existing trajectory'})
             self._start(tid, owner, call_model)
             return True
 
@@ -279,7 +301,11 @@ class TaskManager:
                     status, text = self._verify(row, state, workspace)
                     if status != 'check':
                         state['elapsed'] = elapsed_before + time.monotonic() - started
-                        self.save(tid, status, state, {'type': 'verification', 'text': text, 'step': state['steps']}); return
+                        # Publish the model answer only after artifact verification.
+                        # Commit terminal status and both events under the same lock.
+                        result_events = [{'type': 'result', 'text': a['text'], 'step': state['steps']}] if status == 'completed' else []
+                        self.save(tid, status, state, {'type': 'verification', 'text': text, 'step': state['steps']}, result_events)
+                        return
                     state['messages'].append({'role': 'user', 'content': text})
                     self.save(tid, 'running', state, {'type': 'check', 'text': text}); continue
                 if kind == 'plan':

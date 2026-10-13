@@ -54,6 +54,12 @@ Stop prevents the next action but may wait up to the current provider
 request timeout before returning; it is cooperative, not a hard thread kill.
 Tasks survive HTTP disconnects. Restart interrupts active tasks until explicit
 Resume; counters/checkpoints are restored without blindly replaying writes.
+Saved task selection restores paused questions and completed results on reload
+and selector changes. Model final answers appear as `result` only after explicit
+artifact checks pass, separately from the verifier message. If checks were empty,
+fill the checks JSON field before Resume; existing checks remain immutable.
+The single-process database guard supports Unix and Windows locking; native
+Windows runtime is not yet verified. Use Windows ACLs to protect the data folder.
 
 ## Private access and keys
 
