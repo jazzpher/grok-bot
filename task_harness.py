@@ -152,7 +152,7 @@ class TaskManager:
         tid = secrets.token_hex(16)
         context_rules = '\n'.join(m['content'] for m in history if m.get('role') == 'system')
         past = [m for m in history if m.get('role') != 'system'][-24:]
-        state = {'steps': 0, 'messages': [{'role': 'system', 'content': context_rules + '\n' + RULES},
+        state = {'steps': 0, 'messages': [{'role': 'system', 'content': context_rules + '\n' + workspace.skills.index_context() + '\n' + RULES},
                   *past, {'role': 'user', 'content': goal}], 'written': [], 'checked': [],
                  'pending': None, 'budgets': limits, 'elapsed': 0, 'output': 0, 'retry_streak': 0,
                  'failure_signature': None, 'failure_count': 0}
@@ -217,6 +217,13 @@ class TaskManager:
                 raise ToolError('Interrupted write outcome cannot be verified. No action replayed; inspect files and start a new task.')
             workspace.written.add(a['path'])
             workspace.checked.discard(a['path'])
+        if a['action'] == 'save_skill':
+            try:
+                saved = workspace.skills.read(a['path'])
+                if saved['content'].strip() != a['content'].strip() or saved['description'] != a['text'].strip():
+                    raise ValueError('Different saved workflow')
+            except (ValueError, OSError, UnicodeError):
+                raise ToolError('Interrupted skill save cannot be verified. No replay; inspect Skills and start a new task.')
         state['pending'] = None
         state['written'] = sorted(workspace.written)
         state['checked'] = sorted(workspace.checked)
@@ -322,10 +329,14 @@ class TaskManager:
                         state['pending_digest'] = hashlib.sha256(source.read_bytes()).hexdigest()
                 self.save(tid, 'running', state, {'type': 'action', 'text': 'Executing ' + kind})
                 try:
+                    if kind == 'save_skill':
+                        status, detail = self._verify(row, state, workspace)
+                        if status != 'completed':
+                            raise ToolError('Verify task artifacts before saving learned skills: ' + detail)
                     output = workspace.execute(a)
                     failed = kind == 'compare_files' and output.startswith('MISMATCH:')
-                except (ToolError, OSError, UnicodeError):
-                    output = 'Tool failed. Check required arguments and workspace constraints.'
+                except (ToolError, OSError, UnicodeError) as exc:
+                    output = 'Tool failed: ' + str(exc)[:1000]
                     failed = True
                 if failed:
                     state['failure_count'] = state['failure_count'] + 1 if signature == state['failure_signature'] else 1
