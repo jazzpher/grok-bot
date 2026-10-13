@@ -53,10 +53,14 @@ request remains connected; no background scheduler or resume checkpoints.
 
 ## Private access and keys
 
-Local-only is the default. A public tunnel is rejected unless you set an app
-password before starting:
+Local-only is the default: passwordless access requires a loopback socket peer,
+a loopback Host, and no Forwarded/X-Forwarded-* headers. Host and forwarded
+headers are never proof of authentication. For **every** tunnel, reverse proxy
+(including one that connects locally or strips headers), or cloud deployment,
+explicitly select exposed mode and set an app password before starting:
 
 ```sh
+export GROK_DEPLOYMENT_MODE=exposed
 export GROK_APP_PASSWORD='a-long-unique-password'
 export GROK_SESSION_SECRET='a-long-random-session-secret'
 # For an HTTPS tunnel, also set:
@@ -79,13 +83,16 @@ The old unauthenticated /debug endpoint is removed. Login has a small failed
 attempt limit; this is basic protection, not a full production auth system.
 
 xAI setup: use https://api.x.ai/v1/chat/completions and your selected supported
-Grok model. xAI usage may cost money. The terminal bot.py is unchanged; its
-/new, /save, /help and /exit commands still work.
+Grok model. xAI usage may cost money. The terminal bot.py keeps /new, /save, /help and /exit. Interrupted
+streams return an InterruptedReply status to callers; the CLI stays interactive.
+Partial text may already be visible, but neither the failed user turn nor partial
+assistant output is saved as conversation history. Successful asks still return
+strings. A stream ending without [DONE] is treated as interrupted.
 
 ## Tests
 
 ```sh
-python -m unittest -v test_agent
+python -m unittest discover -v
 python -m py_compile webui.py agent_loop.py bot.py
 ```
 
@@ -114,10 +121,17 @@ Reload now restores the last 24 conversation entries from this session.
 A server restart still loses conversation memory and sessions. Files on disk
 are not automatically reassigned to new sessions. No cross-device history yet.
 
-Exact copies can use copy_file and compare_files to preserve and compare bytes.
-A task asking for an exact copy of one named uploaded document cannot finish
-with output bytes different from that source. This guard is intentionally
-limited to exact-copy tasks, not summaries or other transformations.
+Exact copies use copy_file and compare_files to preserve and compare bytes,
+including CRLF and lone CR. The deterministic completion guard recognizes the
+narrow format `Copy SOURCE exactly to TARGET`, where paths have no spaces;
+SOURCE can be a workspace path or an unambiguous uploaded filename alias.
+TARGET must be separate and outside uploads/. Such a task cannot finish unless
+that specific target exists and its bounded bytes match the source, even if no
+write happened in this request. Ambiguous exact-copy wording asks for explicit
+paths instead of guessing. This is not general semantic goal verification:
+other transformations and unsupported goals remain model-assessed. Repeated
+successful reads are allowed; consecutive identical failed tool arguments stop
+after two failures, and all requests retain the model step budget.
 
 Structured replies require every argument field (empty strings for unused fields).
 Action-specific server validation rejects missing, blank or wrong-type arguments

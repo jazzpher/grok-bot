@@ -2,6 +2,7 @@
 """Local chat and bounded tasks. Public exposure requires GROK_APP_PASSWORD."""
 import argparse
 import hmac
+import ipaddress
 import json
 import os
 import secrets
@@ -229,6 +230,8 @@ app.config.update(MAX_CONTENT_LENGTH=MAX_UPLOAD + 65536, SESSION_COOKIE_HTTPONLY
                   SESSION_COOKIE_SECURE=os.environ.get('GROK_SECURE_COOKIE') == '1',
                   API_KEY=os.environ.get('GROK_API_KEY', ''), MODEL=DEFAULT_MODEL, MOCK=False)
 PASSWORD = os.environ.get('GROK_APP_PASSWORD', '')
+# Any tunnel/reverse proxy must explicitly use exposed mode, even on loopback.
+DEPLOYMENT_MODE = os.environ.get('GROK_DEPLOYMENT_MODE', 'local')
 WORKSPACES = Path(os.environ.get('GROK_WORKSPACE_DIR', 'workspaces')).resolve()
 SETTINGS_FILE = Path(__file__).resolve().parent / 'settings.json'
 settings = {}
@@ -247,13 +250,24 @@ LOGIN = """<!doctype html><html><meta name="viewport" content="width=device-widt
 
 @app.before_request
 def protect():
+    if DEPLOYMENT_MODE not in ('local', 'exposed'):
+        return Response('Invalid GROK_DEPLOYMENT_MODE.', status=403)
+    if not PASSWORD:
+        try:
+            loopback = ipaddress.ip_address(request.remote_addr or '').is_loopback
+        except ValueError:
+            loopback = False
+        # Headers cannot authenticate a peer. Reject proxy indications in local
+        # mode; header-stripping proxies still require explicit exposed mode.
+        proxy_headers = any(h.lower() == 'forwarded' or h.lower().startswith('x-forwarded-')
+                            for h in request.headers.keys())
+        if (DEPLOYMENT_MODE != 'local' or not loopback or proxy_headers
+                or urlparse('http://' + request.host).hostname not in ('127.0.0.1', 'localhost', '::1')):
+            return Response('Public access disabled. Use GROK_DEPLOYMENT_MODE=exposed and GROK_APP_PASSWORD for tunnels/proxies.', status=403)
     if request.endpoint == 'login':
         return None
     if PASSWORD and not session.get('authenticated'):
         return redirect('/login') if request.method == 'GET' else Response('Log in first.', status=401)
-    # Without a password only literal loopback host access is allowed; tunnels fail closed.
-    if not PASSWORD and request.host.split(':')[0] not in ('127.0.0.1', 'localhost', '[::1]'):
-        return Response('Public access disabled. Set GROK_APP_PASSWORD before using a tunnel.', status=403)
     if request.method == 'POST':
         origin = request.headers.get('Origin')
         if origin and urlparse(origin).netloc != request.host:
@@ -330,7 +344,9 @@ def index():
 def chat():
     if request.content_length and request.content_length > 40000:
         return Response('JSON request too large.', status=413)
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return Response('Send a JSON object.', status=400)
     text = data.get('message')
     if not isinstance(text, str) or not text.strip() or len(text) > 12000:
         return Response('Send a message of 1–12000 characters.', status=400)
@@ -369,7 +385,9 @@ def chat():
 def task():
     if request.content_length and request.content_length > 40000:
         return Response('JSON request too large.', status=413)
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return Response('Send a JSON object.', status=400)
     goal = data.get('message')
     if not isinstance(goal, str) or not goal.strip() or len(goal) > 12000:
         return Response('Send a task of 1–12000 characters.', status=400)
@@ -484,7 +502,9 @@ def download(name):
 def set_key():
     if request.content_length and request.content_length > 40000:
         return Response('JSON request too large.', status=413)
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return Response('Send a JSON object.', status=400)
     key, url, model = (data.get(k, '') for k in ('key', 'url', 'model'))
     if not all(isinstance(v, str) for v in (key, url, model)):
         return Response('Invalid settings.', status=400)

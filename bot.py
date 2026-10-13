@@ -21,6 +21,14 @@ import json
 import os
 import sys
 import datetime
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class InterruptedReply:
+    status: str = 'interrupted'
+    partial: str = ''
+    message: str = 'Provider reply interrupted. Partial output was not saved; try again.'
 
 try:
     import requests
@@ -52,6 +60,10 @@ class Chat:
         else:
             reply = self._stream_reply()
 
+        if isinstance(reply, InterruptedReply):
+            # Roll back the failed turn; visible partial output is not history.
+            self.history.pop()
+            return reply
         self.history.append({"role": "assistant", "content": reply})
         return reply
 
@@ -66,39 +78,38 @@ class Chat:
             "Content-Type": "application/json",
         }
         chunks = []
+        resp = None
+        complete = False
         try:
             resp = requests.post(API_URL, headers=headers, json=payload, stream=True, timeout=120)
             resp.raise_for_status()
-        except requests.HTTPError as e:
-            body = ""
-            try:
-                body = e.response.text[:300]
-            except Exception:
-                pass
-            return f"[API error {e.response.status_code}] {body}"
-        except requests.RequestException as e:
-            return f"[Connection error] {e}"
-
-        try:
             for line in resp.iter_lines(decode_unicode=True):
+                if isinstance(line, bytes):
+                    line = line.decode('utf-8')
                 if not line or not line.startswith("data: "):
                     continue
                 data = line[len("data: "):]
                 if data.strip() == "[DONE]":
+                    complete = True
                     break
                 try:
                     piece = json.loads(data)
                     delta = piece["choices"][0].get("delta", {})
                     text = delta.get("content", "")
-                except (json.JSONDecodeError, KeyError, IndexError):
+                except (ValueError, KeyError, IndexError, TypeError, AttributeError):
                     continue
-                if text:
+                if isinstance(text, str) and text:
                     chunks.append(text)
                     print(text, end="", flush=True)
             print()
+        except (requests.RequestException, UnicodeError):
+            print()
+            return InterruptedReply(partial=''.join(chunks))
         finally:
-            resp.close()
-
+            if resp is not None:
+                resp.close()
+        if not complete:
+            return InterruptedReply(partial=''.join(chunks))
         return "".join(chunks) or "[Empty reply from the API]"
 
     def _mock_reply(self, user_text):
@@ -163,7 +174,9 @@ def main():
             continue
 
         print("grok> ", end="", flush=True)
-        chat.ask(user_text)
+        result = chat.ask(user_text)
+        if isinstance(result, InterruptedReply):
+            print('[' + result.message + ']')
         print()
 
 
