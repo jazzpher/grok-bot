@@ -122,7 +122,7 @@ async function send() {
   if (!text || sendBtn.disabled) return;
   const isTask = document.getElementById('mode').value === 'task';
   add('you', text); inp.value = ''; sendBtn.disabled = true;
-  document.getElementById('stop').disabled = !isTask;
+  chatRunning = !isTask; updateStopButton();
   const status = document.getElementById('status');
   status.textContent = isTask ? 'Task running' : 'Replying';
   const bubble = add('grok', ''); let full = ''; let pending = '';
@@ -133,7 +133,8 @@ async function send() {
     });
     if (!res.ok) throw new Error(await res.text());
     if (isTask) {
-      const task = await res.json(); activeTask = task.id;
+      const task = await res.json();
+      taskStatuses.set(task.id, 'queued'); updateStopButton();
       await watchTask(task.id, bubble);
       sendBtn.disabled = false; inp.focus(); return;
     }
@@ -160,15 +161,25 @@ async function send() {
     if (!full) bubble.textContent = '[Empty reply]';
     if (!isTask) status.textContent = 'Ready';
   } catch (e) { bubble.textContent += '\n[Error: ' + e.message + ']'; status.textContent = 'Blocked'; }
-  sendBtn.disabled = false; document.getElementById('stop').disabled = true; inp.focus();
+  chatRunning = false; updateStopButton();
+  sendBtn.disabled = false; inp.focus();
 }
 
 async function stopTask() {
-  const res = await fetch(activeTask ? '/tasks/' + activeTask + '/stop' : '/stop', {method: 'POST'});
-  document.getElementById('status').textContent = res.ok ? 'Stop requested; waiting for current request' : 'Stop request failed';
+  const status = document.getElementById('status');
+  try {
+    const res = await fetch('/stop', {method: 'POST'});
+    if (!res.ok) throw new Error(await res.text());
+    const result = await res.json();
+    status.textContent = result.requested === true ? 'Stop requested; waiting for current request' : 'No running task or chat to stop';
+  } catch (e) { status.textContent = 'Stop request failed: ' + e.message; }
 }
 
-let activeTask = null;
+let chatRunning = false;
+const taskStatuses = new Map();
+function updateStopButton() {
+  document.getElementById('stop').disabled = !chatRunning && !Array.from(taskStatuses.values()).some(status => ['queued','running'].includes(status));
+}
 const watching = new Set();
 const taskViews = new Map();
 function taskBubble(id, bubble) {
@@ -187,7 +198,7 @@ document.getElementById('taskselect').addEventListener('change', showSelectedTas
 async function watchTask(id, bubble) {
   if (watching.has(id)) return;
   const view = taskBubble(id, bubble); bubble = view.bubble;
-  watching.add(id); activeTask = id;
+  watching.add(id);
   let after = view.after;
   try {
     for (;;) {
@@ -198,7 +209,7 @@ async function watchTask(id, bubble) {
       const sr = await fetch('/tasks/' + id); if (!sr.ok) throw new Error('Could not load task status');
       const row = await sr.json();
       document.getElementById('status').textContent = row.status + ' · step ' + row.steps;
-      document.getElementById('stop').disabled = !['queued','running'].includes(row.status);
+      taskStatuses.set(id, row.status); updateStopButton();
       if (!['queued','running'].includes(row.status)) {
         // Status may have committed after the preceding events request.
         // Drain only after observing terminal state, using the same cursor.
@@ -223,6 +234,9 @@ async function restoreTasks(watch = true) {
   try {
     const res = await fetch('/tasks'); if (!res.ok) return;
     const rows = await res.json(); const select = document.getElementById('taskselect');
+    taskStatuses.clear();
+    for (const row of rows) taskStatuses.set(row.id, row.status);
+    updateStopButton();
     const selected = select.value; select.replaceChildren();
     for (const row of rows) {
       const option = document.createElement('option'); option.value = row.id;
@@ -244,6 +258,7 @@ async function resumeTask() {
     const checksText = document.getElementById('checks').value.trim();
     const res = await fetch('/tasks/' + id + '/resume', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({answer, ...(checksText ? {checks: JSON.parse(checksText)} : {})})});
     if (!res.ok) { document.getElementById('status').textContent = await res.text(); return; }
+    taskStatuses.set(id, 'queued'); updateStopButton();
     inp.value = ''; watchTask(id, taskBubble(id).bubble).catch(e => add('grok', e.message));
   } catch (e) { document.getElementById('status').textContent = 'Resume failed: ' + e.message; }
 }
@@ -466,6 +481,7 @@ def chat():
     if task_manager().busy(sid):
         c['busy'].release()
         return Response('This session is already running.', status=409)
+    c['stop'].clear()
     cfg = config_snapshot()
     def generate():
         chunks = []
@@ -477,6 +493,7 @@ def chat():
             else:
                 with model_reply(messages, cfg, stream=True) as res:
                     for raw in res.iter_lines():
+                        if c['stop'].is_set(): break
                         line = raw.decode('utf-8')
                         if not line.startswith('data: '): continue
                         if line[6:].strip() == '[DONE]': break
@@ -581,10 +598,13 @@ def task_resume(tid):
 
 @app.route('/stop', methods=['POST'])
 def stop():
-    client()['stop'].set()
-    for row in task_manager().list(session['sid']):
-        if row['status'] in ('queued', 'running'): task_manager().stop(row['id'], session['sid'])
-    return Response('Stop requested.', content_type='text/plain')
+    c = client(); manager = task_manager(); sid = session['sid']
+    requested = c['busy'].locked()
+    c['stop'].set()
+    for row in manager.list(sid):
+        if row['status'] in ('queued', 'running'):
+            requested = manager.stop(row['id'], sid) or requested
+    return {'requested': requested}
 
 @app.route('/clear', methods=['POST'])
 def clear():
