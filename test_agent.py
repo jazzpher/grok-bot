@@ -117,6 +117,10 @@ class WebTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
         webui.WORKSPACES=Path(self.tmp.name); webui.clients.clear(); webui.settings.clear()
+        from task_harness import TaskManager
+        self.manager=TaskManager(Path(self.tmp.name)/'tasks.db', Path(self.tmp.name))
+        self.manager_patch=patch.object(webui,'TASKS',self.manager); self.manager_patch.start()
+        self.addCleanup(self.manager_patch.stop); self.addCleanup(self.manager.close)
         webui.app.config.update(TESTING=True, MOCK=True, API_KEY='')
         self.a=webui.app.test_client(); self.b=webui.app.test_client()
     def tearDown(self): self.tmp.cleanup()
@@ -160,8 +164,12 @@ class WebTests(unittest.TestCase):
         actions=[{'action':'calculate','expression':'17*23'}, {'action':'write_file','path':'answer.txt','content':'391'},
                  {'action':'read_file','path':'answer.txt'}, {'action':'done','text':'Checked 391 in answer.txt'}]
         with patch.object(webui,'model_reply',side_effect=[Reply(a) for a in actions]):
-            events=[json.loads(line) for line in self.post(self.a,'/task',json={'message':'calculate then save'}).get_data(as_text=True).splitlines()]
-        self.assertEqual(events[-1]['type'],'done')
+            response=self.post(self.a,'/task',json={'message':'calculate then save', 'checks':[{'type':'file_text','path':'answer.txt','text':'391'}]})
+            self.assertEqual(response.status_code,202)
+            tid=response.json['id']
+            self.manager.threads[tid].join(3)
+            row=self.a.get('/tasks/'+tid,base_url='http://localhost').json
+        self.assertEqual(row['status'],'completed')
         with self.a.get('/files/answer.txt',base_url='http://localhost') as response:
             self.assertEqual(response.get_data(as_text=True),'391')
         self.assertEqual(self.b.get('/files/answer.txt',base_url='http://localhost').status_code,404)

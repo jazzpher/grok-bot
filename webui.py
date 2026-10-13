@@ -15,6 +15,7 @@ from flask import Flask, Response, request, render_template_string, session, red
 from agent_loop import ACTION_SCHEMA, Workspace, run_loop
 from documents import extract_text, MAX_UPLOAD
 from werkzeug.utils import secure_filename
+from task_harness import TaskManager
 
 API_URL = os.environ.get('GROK_API_URL', 'https://api.x.ai/v1/chat/completions')
 DEFAULT_MODEL = os.environ.get('GROK_MODEL', 'grok-4-fast')
@@ -90,6 +91,9 @@ PAGE = r"""<!doctype html>
 <div style="padding:8px 16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
 <label>Mode <select id="mode"><option value="chat">Chat</option><option value="task">Task loop</option></select></label>
 <button id="stop" onclick="stopTask()" disabled>Stop</button>
+<button onclick="resumeTask()">Resume selected task</button>
+<select id="taskselect" aria-label="Saved task"></select>
+<input id="checks" aria-label="Artifact checks JSON" placeholder='Checks JSON (also Resume if missing): [{"type":"file_text","path":"out.txt","text":"hello"}]' style="max-width:360px;width:100%">
 <button onclick="showFiles()">Workspace files</button>
 <label style="background:#1c2026;padding:4px 8px;border-radius:6px;cursor:pointer;display:flex;gap:6px;align-items:center">Upload file<input id="upload" type="file" style="max-width:160px" aria-label="Upload document" accept=".txt,.md,.csv,.json,.py,.js,.html,.css,.pdf,.docx" onchange="uploadFile(this)"></label>
 <span id="status" role="status" aria-live="polite">Ready</span>
@@ -125,9 +129,14 @@ async function send() {
   try {
     const res = await fetch(isTask ? '/task' : '/chat', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text})
+      body: JSON.stringify({message: text, ...(isTask && document.getElementById('checks').value.trim() ? {checks: JSON.parse(document.getElementById('checks').value)} : {})})
     });
     if (!res.ok) throw new Error(await res.text());
+    if (isTask) {
+      const task = await res.json(); activeTask = task.id;
+      await watchTask(task.id, bubble);
+      sendBtn.disabled = false; inp.focus(); return;
+    }
     const reader = res.body.getReader(); const dec = new TextDecoder();
     for (;;) {
       const {done, value} = await reader.read();
@@ -155,9 +164,90 @@ async function send() {
 }
 
 async function stopTask() {
-  const res = await fetch('/stop', {method: 'POST'});
+  const res = await fetch(activeTask ? '/tasks/' + activeTask + '/stop' : '/stop', {method: 'POST'});
   document.getElementById('status').textContent = res.ok ? 'Stop requested; waiting for current request' : 'Stop request failed';
 }
+
+let activeTask = null;
+const watching = new Set();
+const taskViews = new Map();
+function taskBubble(id, bubble) {
+  let view = taskViews.get(id);
+  if (!view || view.bubble.isConnected === false) {
+    view = {bubble: bubble || add('grok', 'Saved task\n'), after: 0};
+    taskViews.set(id, view);
+  }
+  return view;
+}
+async function showSelectedTask() {
+  const id = document.getElementById('taskselect').value;
+  if (id) await watchTask(id, taskBubble(id).bubble);
+}
+document.getElementById('taskselect').addEventListener('change', showSelectedTask);
+async function watchTask(id, bubble) {
+  if (watching.has(id)) return;
+  const view = taskBubble(id, bubble); bubble = view.bubble;
+  watching.add(id); activeTask = id;
+  let after = view.after;
+  try {
+    for (;;) {
+      const er = await fetch('/tasks/' + id + '/events?after=' + after);
+      if (!er.ok) throw new Error('Could not load task events');
+      const events = await er.json();
+      for (const e of events) { if (e.seq <= after) continue; after = view.after = e.seq; if (e.type !== 'progress') bubble.textContent += '[' + e.type + '] ' + e.text + '\n'; }
+      const sr = await fetch('/tasks/' + id); if (!sr.ok) throw new Error('Could not load task status');
+      const row = await sr.json();
+      document.getElementById('status').textContent = row.status + ' · step ' + row.steps;
+      document.getElementById('stop').disabled = !['queued','running'].includes(row.status);
+      if (!['queued','running'].includes(row.status)) {
+        // Status may have committed after the preceding events request.
+        // Drain only after observing terminal state, using the same cursor.
+        for (;;) {
+          const finalRes = await fetch('/tasks/' + id + '/events?after=' + after);
+          if (!finalRes.ok) throw new Error('Could not load final task events');
+          const finalEvents = await finalRes.json();
+          for (const e of finalEvents) {
+            if (e.seq <= after) continue;
+            after = view.after = e.seq;
+            if (e.type !== 'progress') bubble.textContent += '[' + e.type + '] ' + e.text + '\n';
+          }
+          if (finalEvents.length < 200) break;
+        }
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  } finally { watching.delete(id); await restoreTasks(false); }
+}
+async function restoreTasks(watch = true) {
+  try {
+    const res = await fetch('/tasks'); if (!res.ok) return;
+    const rows = await res.json(); const select = document.getElementById('taskselect');
+    const selected = select.value; select.replaceChildren();
+    for (const row of rows) {
+      const option = document.createElement('option'); option.value = row.id;
+      option.textContent = row.status + ': ' + row.goal.slice(0, 60); select.appendChild(option);
+    }
+    if (rows.some(row => row.id === selected)) select.value = selected;
+    if (watch) {
+      for (const row of rows.filter(row => ['queued','running'].includes(row.status))) {
+        watchTask(row.id, taskBubble(row.id).bubble).catch(e => add('grok', e.message));
+      }
+      await showSelectedTask();
+    }
+  } catch (e) { document.getElementById('status').textContent = e.message; }
+}
+async function resumeTask() {
+  const id = document.getElementById('taskselect').value; if (!id) return;
+  const answer = inp.value.trim();
+  try {
+    const checksText = document.getElementById('checks').value.trim();
+    const res = await fetch('/tasks/' + id + '/resume', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({answer, ...(checksText ? {checks: JSON.parse(checksText)} : {})})});
+    if (!res.ok) { document.getElementById('status').textContent = await res.text(); return; }
+    inp.value = ''; watchTask(id, taskBubble(id).bubble).catch(e => add('grok', e.message));
+  } catch (e) { document.getElementById('status').textContent = 'Resume failed: ' + e.message; }
+}
+restoreTasks();
 
 async function uploadFile(input) {
   const file = input.files[0]; if (!file) return;
@@ -233,6 +323,15 @@ PASSWORD = os.environ.get('GROK_APP_PASSWORD', '')
 # Any tunnel/reverse proxy must explicitly use exposed mode, even on loopback.
 DEPLOYMENT_MODE = os.environ.get('GROK_DEPLOYMENT_MODE', 'local')
 WORKSPACES = Path(os.environ.get('GROK_WORKSPACE_DIR', 'workspaces')).resolve()
+TASKS = None
+tasks_lock = threading.Lock()
+
+def task_manager():
+    global TASKS
+    with tasks_lock:
+        if TASKS is None:
+            TASKS = TaskManager(Path(os.environ.get('GROK_TASK_DB', str(WORKSPACES / '.tasks.sqlite3'))), WORKSPACES)
+        return TASKS
 SETTINGS_FILE = Path(__file__).resolve().parent / 'settings.json'
 settings = {}
 # Migration: read existing settings, but reject unsafe endpoints. No new key persistence.
@@ -306,12 +405,18 @@ def client():
         if sid not in clients:
             if len(clients) >= 100:
                 # Only inactive oldest sessions are evicted.
-                inactive = [k for k, v in clients.items() if not v['busy'].locked()]
+                inactive = [k for k, v in clients.items() if not v['busy'].locked() and not task_manager().busy(k)]
                 if not inactive:
                     raise RuntimeError('All sessions busy.')
                 del clients[inactive[0]]
-            clients[sid] = {'history': [], 'busy': threading.Lock(), 'stop': threading.Event(),
-                            'workspace': Workspace(WORKSPACES / sid), 'uploads': {}}
+            workspace = Workspace(WORKSPACES / sid)
+            uploads = {}
+            for p in workspace.root.glob('uploads/*'):
+                if p.is_file() and not p.is_symlink() and p.stat().st_size <= 32000:
+                    try: uploads[str(p.relative_to(workspace.root))] = p.read_text(encoding='utf-8')
+                    except (OSError, UnicodeError): pass
+            clients[sid] = {'history': task_manager().load_history(sid), 'busy': threading.Lock(), 'stop': threading.Event(),
+                            'workspace': workspace, 'uploads': uploads}
         return clients[sid]
 
 
@@ -332,7 +437,11 @@ def model_reply(messages, cfg, stream=False, structured=False):
     res = requests.post(url, headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'},
                         json=payload,
                         stream=stream, timeout=(10, 45))
-    res.raise_for_status()
+    try:
+        res.raise_for_status()
+    except requests.RequestException:
+        res.close()
+        raise
     return res
 
 
@@ -351,7 +460,11 @@ def chat():
     if not isinstance(text, str) or not text.strip() or len(text) > 12000:
         return Response('Send a message of 1–12000 characters.', status=400)
     c = client()
+    sid = session['sid']
     if not c['busy'].acquire(False):
+        return Response('This session is already running.', status=409)
+    if task_manager().busy(sid):
+        c['busy'].release()
         return Response('This session is already running.', status=409)
     cfg = config_snapshot()
     def generate():
@@ -372,6 +485,7 @@ def chat():
                         if piece: chunks.append(piece); yield piece
             c['history'].extend([{'role': 'user', 'content': text}, {'role': 'assistant', 'content': ''.join(chunks)}])
             c['history'] = c['history'][-24:]
+            task_manager().store_history(sid, c['history'])
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else 'unknown'
             yield f'[Provider HTTP {status}. Check key permissions, model availability and quota.]'
@@ -391,32 +505,85 @@ def task():
     goal = data.get('message')
     if not isinstance(goal, str) or not goal.strip() or len(goal) > 12000:
         return Response('Send a task of 1–12000 characters.', status=400)
-    c = client()
+    c = client(); sid = session['sid']; manager = task_manager()
     if not c['busy'].acquire(False):
         return Response('This session is already running.', status=409)
-    c['stop'].clear(); cfg = config_snapshot()
+    try:
+        if app.config['MOCK'] and not config_snapshot()[0]:
+            return {'type': 'blocked', 'text': 'Task mode needs a real API key. Mock mode cannot perform tasks.', 'step': 0}, 400
+        tid = manager.submit(sid, goal, [*c['history'], *upload_context(c)], task_provider(),
+                             checks=data.get('checks'), budgets=data.get('budgets'))
+        return {'id': tid, 'status': 'queued', 'status_url': '/tasks/' + tid}, 202
+    except (ValueError, OSError) as exc:
+        return {'error': str(exc)}, 400
+    except RuntimeError:
+        return {'error': 'This session is already running.'}, 409
+    finally:
+        c['busy'].release()
+
+
+def task_provider():
+    cfg = config_snapshot()
     def call(messages):
         with model_reply(messages, cfg, structured=True) as res:
             return res.json()['choices'][0]['message']['content']
-    def generate():
-        try:
-            if app.config['MOCK'] and not cfg[0]:
-                yield json.dumps({'type': 'blocked', 'text': 'Task mode needs a real API key. Mock mode cannot perform tasks.', 'step': 0}) + '\n'
-                return
-            last = None
-            for event in run_loop(goal, [*c['history'], *upload_context(c)], c['workspace'], call, c['stop'].is_set):
-                last = event
-                yield json.dumps(event, ensure_ascii=False) + '\n'
-            if last:
-                c['history'].extend([{'role': 'user', 'content': goal}, {'role': 'assistant', 'content': last['type'] + ': ' + last['text']}])
-                c['history'] = c['history'][-24:]
-        finally:
-            c['busy'].release()
-    return Response(generate(), content_type='application/x-ndjson; charset=utf-8')
+    return call
+
+
+@app.route('/tasks')
+def task_list():
+    return [{'id': r['id'], 'status': r['status'], 'goal': r['goal'], 'steps': r['state']['steps']}
+            for r in task_manager().list(session['sid'])]
+
+
+@app.route('/tasks/<tid>')
+def task_status(tid):
+    row = task_manager().get(tid, session['sid'])
+    if not row: return {'error': 'Not found'}, 404
+    return {'id': tid, 'status': row['status'], 'goal': row['goal'],
+            'steps': row['state']['steps'], 'budgets': row['state']['budgets'],
+            'elapsed': row['state']['elapsed'], 'output': row['state']['output']}
+
+
+@app.route('/tasks/<tid>/events')
+def task_events(tid):
+    manager = task_manager()
+    if not manager.get(tid, session['sid']): return {'error': 'Not found'}, 404
+    try: after = int(request.args.get('after', '0'))
+    except ValueError: return {'error': 'Invalid cursor'}, 400
+    if after < 0: return {'error': 'Invalid cursor'}, 400
+    return manager.events(tid, session['sid'], after)
+
+
+@app.route('/tasks/<tid>/stop', methods=['POST'])
+def task_stop(tid):
+    manager = task_manager()
+    if not manager.get(tid, session['sid']): return {'error': 'Not found'}, 404
+    return {'requested': manager.stop(tid, session['sid'])}
+
+
+@app.route('/tasks/<tid>/resume', methods=['POST'])
+def task_resume(tid):
+    manager = task_manager(); sid = session['sid']
+    if not manager.get(tid, sid): return {'error': 'Not found'}, 404
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get('answer', ''), str) or len(data.get('answer', '')) > 12000:
+        return {'error': 'Send JSON with optional answer up to 12000 characters'}, 400
+    c = client()
+    if not c['busy'].acquire(False): return {'error': 'Session busy'}, 409
+    try:
+        if not manager.resume(tid, sid, task_provider(), data.get('answer', ''), checks=data.get('checks')):
+            return {'error': 'Task not resumable or session busy; budgets are not reset.'}, 409
+        return {'id': tid, 'status': 'queued'}, 202
+    except (ValueError, OSError) as exc:
+        return {'error': str(exc)}, 400
+    finally: c['busy'].release()
 
 @app.route('/stop', methods=['POST'])
 def stop():
     client()['stop'].set()
+    for row in task_manager().list(session['sid']):
+        if row['status'] in ('queued', 'running'): task_manager().stop(row['id'], session['sid'])
     return Response('Stop requested.', content_type='text/plain')
 
 @app.route('/clear', methods=['POST'])
@@ -424,7 +591,12 @@ def clear():
     c = client()
     if not c['busy'].acquire(False):
         return Response('Stop the running task first.', status=409)
-    try: c['history'] = []
+    if task_manager().busy(session['sid']):
+        c['busy'].release()
+        return Response('Stop the running task first.', status=409)
+    try:
+        c['history'] = []
+        task_manager().store_history(session['sid'], [])
     finally: c['busy'].release()
     return 'ok'
 
@@ -452,6 +624,9 @@ def upload():
     c = client()
     if not c['busy'].acquire(False):
         return {'error': 'Wait until the current run stops before uploading.'}, 409
+    if task_manager().busy(session['sid']):
+        c['busy'].release()
+        return {'error': 'Wait until the current run stops before uploading.'}, 409
     try:
         file = request.files.get('file')
         if not file or not file.filename:
@@ -477,6 +652,7 @@ def upload():
         c['uploads'][name] = text
         c['history'].append({'role': 'assistant', 'content': 'Uploaded ' + name + '. Available as document context.'})
         c['history'] = c['history'][-24:]
+        task_manager().store_history(session['sid'], c['history'])
         return {'path': name, 'characters': len(text)}
     finally:
         c['busy'].release()
@@ -535,7 +711,12 @@ def main():
     app.config.update(MOCK=args.mock, MODEL=args.model)
     if not PASSWORD: print('Local-only access. Set GROK_APP_PASSWORD before sharing a tunnel.')
     if SETTINGS_FILE.exists(): print('Legacy settings.json loaded. Remove it after moving your key to an environment variable; new settings are memory-only.')
-    app.run(host='127.0.0.1', port=args.port, debug=False, threaded=True)
+    manager = task_manager()
+    manager.prune()
+    try:
+        app.run(host='127.0.0.1', port=args.port, debug=False, threaded=True)
+    finally:
+        manager.close()
 
 if __name__ == '__main__':
     main()

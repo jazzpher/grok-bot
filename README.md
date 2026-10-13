@@ -15,9 +15,10 @@ python webui.py
 ```
 
 Open http://127.0.0.1:5000. Chat mode streams replies as before. Task loop mode
-plans, uses a tool, sees its output and chooses the next step. A task stops on
-completion, a missing-input question, provider failure, repeated action,
-Stop, or the 12-step budget. It never labels a budget stop as success.
+plans, uses a tool, sees its output and chooses the next step in a durable
+background worker. [HARNESS.md](HARNESS.md) documents checks, resume, API,
+budgets, persistence, retention and deployment limits. Completion requires
+explicit supported artifact checks; a budget stop is never success.
 
 Gemini can work with an eligible free-tier API key, subject to your account's
 model availability and quota. Each step is a separate model request, so tasks
@@ -33,23 +34,32 @@ silently switch to other models or a mock answer.
 - Ask you for missing information or report unsupported work.
 
 Example: "Calculate 17 x 23, save the result in answer.txt, and read it back
-to check it." Click Workspace files to download the result.
+to check it." Supply checks JSON `[{"type":"file_text","path":"answer.txt","text":"391"}]`.
+Click Workspace files to download the result.
 
 This is NOT a browser/computer-control agent. It cannot run shell commands,
 install packages, browse the web, send messages, buy things, or reach your
-computer's files. A completion message is the model's assessment, not a
-proof that every possible goal is met. Review generated content.
+computer's files. Completion verifies only the explicit supported byte checks,
+not every possible semantic goal. Review generated content.
 
 Files are limited to 25 per session, 32 KB per file and 256 KB total. Paths
 cannot escape the workspace. Existing files in that workspace can be
 replaced by a task. Download important results. New chat clears only your
-conversation, not workspace files. Reload restores the last 24 visible messages in this session. A restart resets conversations and
-sessions; existing workspace folders stay on disk. Remove unused folders
-manually when the app is stopped. This demo is not a multi-user service.
+conversation, not workspace files or task evidence. Last 24 chat entries and
+task trajectories persist in SQLite. Set a stable GROK_SESSION_SECRET to keep
+session access across restarts. Remove unused workspace folders manually when
+the app is stopped. This demo is not a multi-user service.
 
 Stop prevents the next action but may wait up to the current provider
-request timeout (45 seconds) before returning. Tasks run only while their
-request remains connected; no background scheduler or resume checkpoints.
+request timeout before returning; it is cooperative, not a hard thread kill.
+Tasks survive HTTP disconnects. Restart interrupts active tasks until explicit
+Resume; counters/checkpoints are restored without blindly replaying writes.
+Saved task selection restores paused questions and completed results on reload
+and selector changes. Model final answers appear as `result` only after explicit
+artifact checks pass, separately from the verifier message. If checks were empty,
+fill the checks JSON field before Resume; existing checks remain immutable.
+The single-process database guard supports Unix and Windows locking; native
+Windows runtime is not yet verified. Use Windows ACLs to protect the data folder.
 
 ## Private access and keys
 
@@ -118,18 +128,19 @@ The app has no external-action tools. PDF/DOCX parsing is bounded but not a
 hardened document sandbox; use trusted files and keep dependencies updated.
 
 Reload now restores the last 24 conversation entries from this session.
-A server restart still loses conversation memory and sessions. Files on disk
-are not automatically reassigned to new sessions. No cross-device history yet.
+Server restart retains SQLite history and tasks; a stable session secret is
+required to retain access. Files are never reassigned to new sessions. No
+cross-device history/account recovery. Metadata retention defaults to 30 days.
 
 Exact copies use copy_file and compare_files to preserve and compare bytes,
 including CRLF and lone CR. The deterministic completion guard recognizes the
 narrow format `Copy SOURCE exactly to TARGET`, where paths have no spaces;
-SOURCE can be a workspace path or an unambiguous uploaded filename alias.
+In durable Task mode SOURCE must be a literal workspace path.
 TARGET must be separate and outside uploads/. Such a task cannot finish unless
 that specific target exists and its bounded bytes match the source, even if no
 write happened in this request. Ambiguous exact-copy wording asks for explicit
 paths instead of guessing. This is not general semantic goal verification:
-other transformations and unsupported goals remain model-assessed. Repeated
+other transformations require explicit supported checks, or need clarification. Repeated
 successful reads are allowed; consecutive identical failed tool arguments stop
 after two failures, and all requests retain the model step budget.
 
