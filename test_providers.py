@@ -96,6 +96,27 @@ class PresetTests(Base):
         self.assertIn('requires a new key', r.get_data(as_text=True))
 
 
+class ModelHintTests(Base):
+    def test_every_preset_has_a_model_that_is_not_the_xai_default(self):
+        for pid, p in webui.PROVIDERS.items():
+            self.assertTrue(p['model_hint'], pid)
+            if pid != 'xai':
+                self.assertNotEqual(p['model_hint'], webui.DEFAULT_MODEL, pid)
+
+    def test_blank_model_never_falls_back_to_grok_4_fast(self):
+        for pid, p in webui.PROVIDERS.items():
+            if pid == 'xai':
+                continue
+            webui.settings.clear()
+            r = self.post('/set_key', json={'key': 'fake-key-for-test', 'provider': pid, 'model': ''})
+            self.assertEqual(r.status_code, 200, pid)
+            self.assertEqual(webui.settings['model_override'], p['model_hint'], pid)
+            self.assertNotEqual(webui.settings['model_override'], 'grok-4-fast', pid)
+
+    def test_nvidia_default_is_current_free_model(self):
+        self.assertEqual(webui.PROVIDERS['nvidia']['model_hint'], 'nvidia/nemotron-3-ultra-550b-a55b')
+
+
 class PrefixTests(Base):
     def test_nvidia_prefix_autodetects(self):
         r = self.post('/set_key', json={'key': FAKE_NV})
