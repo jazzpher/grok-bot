@@ -91,7 +91,7 @@ unlimited archival guarantee. The direct manager API exposes explicit `prune()`.
 
 ## Bounds and limitations
 
-Defaults/hard upper bounds: 12 provider attempts, 300 seconds cumulative active
+Defaults/hard upper bounds: 12 action steps, 300 seconds cumulative active
 elapsed time, 128000 cumulative UTF-8 bytes of model/tool output, 24000 serialized
 context characters. Client budgets may only lower these. Minimum context is 4000.
 Provider responses are streamed with a body cap of six times the remaining output
@@ -105,7 +105,7 @@ Transient connection/timeouts and HTTP 500/502/503/504 retry at most three
 consecutive times (the UI shows "retrying 2 of 3") with cancellable bounded backoff;
 each attempt consumes the attempt budget. After the third retry the task is `blocked` with a plain
 message and can be resumed. 400/401/403/404/429 never retry. No fallback model, billing changes or quota bypass.
-Malformed actions consume attempts without tools (valid-action steps remain separate). Repeated same failed required
+Malformed actions do not use a step; they stop after 5 per task. Repeated same failed required
 arguments stop after two failures. Successful tool reads reset that guard.
 
 Context compaction creates a bounded provider view retaining rules, original goal, requirements, checks and cumulative clarifications (12 KB),
