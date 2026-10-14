@@ -18,6 +18,7 @@ from documents import extract_text, MAX_UPLOAD
 from werkzeug.utils import secure_filename
 from task_harness import OutputBudgetExceeded, TaskManager, MAX_RETRIES, is_transient, friendly_provider_error
 import task_harness
+import model_discovery
 
 API_URL = os.environ.get('GROK_API_URL', 'https://api.x.ai/v1/chat/completions')
 DEFAULT_MODEL = os.environ.get('GROK_MODEL', 'grok-4-fast')
@@ -185,9 +186,14 @@ PAGE = r"""<!doctype html>
   </div>
   <div id="settings">
     <select id="providersel" aria-label="Provider" onchange="providerChanged()"></select>
-    <input id="keyin" type="password" placeholder="API key" autocomplete="off">
-    <input id="urlin" placeholder="Custom API URL (public https only)" autocomplete="off" style="display:none">
-    <input id="modelin" placeholder="Model (optional, blank = auto)" autocomplete="off">
+    <input id="keyin" oninput="discoveryChanged()" type="password" placeholder="API key" autocomplete="off">
+    <input id="urlin" oninput="discoveryChanged()" placeholder="Custom API URL (public https only)" autocomplete="off" style="display:none">
+    <input id="modelsurl" aria-label="Custom models URL" placeholder="Models URL (explicit, same origin as chat URL)" oninput="discoveryChanged()" style="display:none">
+    <select id="modelsel" aria-label="Discovered models" onchange="selectDiscoveredModel()"><option value="">Choose a listed model (optional)</option></select>
+    <button id="refreshmodels" onclick="refreshModels(true)">Refresh models</button>
+    <span id="modelstatus" role="status" aria-live="polite">Listed does not mean chat support or free quota. Manual entry always works.</span>
+    <input id="modelin" aria-label="Model" placeholder="Model (optional, blank = auto)" autocomplete="off">
+    <small style="flex-basis:100%">Listing is not a chat test or a free-quota guarantee. Choose explicitly, then Save. Manual entry always works.</small>
     <button onclick="saveKey()">Save</button>
     <button id="testbtn" onclick="testKey()">Test</button>
     <span id="keystatus" role="status" aria-live="polite"></span>
@@ -568,9 +574,56 @@ function providerChanged() {
   const p = providerList.find(x => x.id === sel.value);
   const mi = document.getElementById('modelin');
   mi.placeholder = p && p.model_hint ? 'Model (blank = ' + p.model_hint + ')' : 'Model (optional, blank = auto)';
-  // Prefill so the request never falls back to a model the provider does not have.
-  if (p && p.model_hint && (!mi.value || providerList.some(x => x.model_hint === mi.value))) mi.value = p.model_hint;
-  else if (custom && providerList.some(x => x.model_hint === mi.value)) mi.value = '';
+  document.getElementById('modelsurl').style.display = custom ? '' : 'none';
+  discoveryChanged();
+}
+let discoveryVersion = 0;
+let discoveryTimer;
+function clearModelChoices() {
+  const sel = document.getElementById('modelsel');
+  sel.replaceChildren();
+  const op = document.createElement('option'); op.value = ''; op.textContent = 'Choose a listed model (optional)'; sel.appendChild(op);
+  sel.value = '';
+}
+function discoveryChanged() {
+  discoveryVersion++;
+  clearModelChoices();
+  document.getElementById('modelstatus').textContent = 'Model list changed. Manual entry always works.';
+  if (typeof clearTimeout === 'function') clearTimeout(discoveryTimer);
+  discoveryTimer = setTimeout(() => refreshModels(false), 600);
+}
+function selectDiscoveredModel() {
+  const sel = document.getElementById('modelsel');
+  if (sel.value) document.getElementById('modelin').value = sel.value;
+}
+async function refreshModels(force = true) {
+  const version = ++discoveryVersion;
+  const sel = document.getElementById('providersel');
+  const custom = sel.value === 'custom';
+  const st = document.getElementById('modelstatus');
+  const btn = document.getElementById('refreshmodels');
+  clearModelChoices();
+  btn.disabled = true; st.textContent = 'Loading model list...';
+  try {
+    const res = await fetch('/models', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({provider: custom ? '' : sel.value, key: document.getElementById('keyin').value,
+        url: custom ? document.getElementById('urlin').value : '',
+        models_url: custom ? document.getElementById('modelsurl').value : '', refresh: force})});
+    const r = await res.json();
+    if (version !== discoveryVersion) return;
+    st.textContent = r.message || 'Model listing unavailable. Enter a model manually.';
+    if (!res.ok) return;
+    for (const id of r.models || []) {
+      const op = document.createElement('option'); op.value = id; op.textContent = id;
+      document.getElementById('modelsel').appendChild(op);
+    }
+    // Deliberately leave the placeholder selected; only an explicit choice edits modelin.
+    document.getElementById('modelsel').value = '';
+  } catch (_) {
+    if (version === discoveryVersion) st.textContent = 'Could not load models. Enter a model manually.';
+  } finally {
+    if (version === discoveryVersion) btn.disabled = false;
+  }
 }
 async function toggleSettings() {
   const open = document.getElementById('settings').classList.toggle('open');
@@ -589,6 +642,7 @@ async function refreshKeyStatus() {
     const res = await fetch('/key_status'); if (!res.ok) return;
     const s = await res.json();
     currentProviderId = s.provider_id || '';
+    if (!document.getElementById('modelin').value && s.model) document.getElementById('modelin').value = s.model;
     box.textContent = '';
     if (!s.configured) { box.textContent = 'No key saved yet.'; return; }
     const b = document.createElement('b'); b.textContent = s.masked;
@@ -623,7 +677,7 @@ async function saveKey() {
   });
   const st = await saveRes.text();
   setKeyStatus(st, saveRes.ok ? 'ok' : 'bad');
-  if (saveRes.ok) { keyin.value = ''; refreshKeyStatus(); }
+  if (saveRes.ok) { keyin.value = ''; await refreshKeyStatus(); discoveryChanged(); }
 }
 
 async function clearChat() {
@@ -1318,6 +1372,50 @@ def list_providers():
             for pid, p in PROVIDERS.items()]
 
 
+@app.route('/models', methods=['POST'])
+def list_models():
+    # No settings mutation: a typed key can discover before Save.
+    if request.content_length and request.content_length > 12000:
+        return {'message': 'Model-list request too large.'}, 413
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return {'message': 'Send a JSON object.'}, 400
+    fields = [data.get(k, '') for k in ('provider', 'key', 'url', 'models_url')]
+    if not all(isinstance(v, str) for v in fields) or not isinstance(data.get('refresh', False), bool):
+        return {'message': 'Invalid model-list settings.'}, 400
+    provider, key, chat_url, endpoint = [v.strip() for v in fields]
+    if provider:
+        if provider not in PROVIDERS or chat_url or endpoint:
+            return {'message': 'Pick one listed provider or use explicit custom URLs.'}, 400
+        chat_url, endpoint = PROVIDERS[provider]['url'], model_discovery.MODEL_URLS[provider]
+    else:
+        # Never guess a custom catalog URL. Revalidate DNS even for saved URLs.
+        if not chat_url or not endpoint:
+            return {'message': 'Enter the chat URL and its same-origin models URL, or use a model manually.'}, 400
+        for url in (chat_url, endpoint):
+            err = custom_url_error(url)
+            if err:
+                return {'message': err}, 400
+        try:
+            p = urlparse(endpoint)
+            if (model_discovery.origin(endpoint) != model_discovery.origin(chat_url)
+                    or p.query or p.fragment):
+                return {'message': 'Models URL must have the same origin as the chat URL, with no query or fragment.'}, 400
+        except ValueError:
+            return {'message': 'Invalid models URL.'}, 400
+    stored_key, stored_url, _ = config_snapshot()
+    if not key:
+        if chat_url != stored_url:
+            return {'message': 'Enter a key for this provider. The saved key will not be sent to a different endpoint.'}, 400
+        key = stored_key
+    if not key:
+        return {'message': 'Enter an API key to list models, or type a model manually.'}, 400
+    try:
+        return model_discovery.discover(key, endpoint, provider, data.get('refresh', False))
+    except model_discovery.DiscoveryError as exc:
+        return {'message': str(exc), 'models': []}, 502
+
+
 @app.route('/set_key', methods=['POST'])
 def set_key():
     if request.content_length and request.content_length > 40000:
@@ -1354,9 +1452,10 @@ def set_key():
         if key: settings['key_override'] = key
         if url: settings['url_override'] = url
         if model: settings['model_override'] = model
-        elif provider and PROVIDERS[provider]['model_hint'] and (key or url):
+        elif provider and PROVIDERS[provider]['model_hint'] and (url != current_url or not settings.get('model_override')):
             settings['model_override'] = PROVIDERS[provider]['model_hint']
         if custom: custom_endpoints.add(url)
+    model_discovery.clear_cache()
     label = provider_label(settings.get('url_override') or API_URL)
     if custom: label += ' (custom URL)'
     return Response('Saved in memory only. %s selected.' % label, content_type='text/plain')

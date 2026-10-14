@@ -70,5 +70,23 @@ const PRESETS=[{id:'gemini',label:'Google Gemini',url:'https://generativelanguag
    await vm.runInContext('loadProviders()',s.ctx); s.el('providersel').value='gemini';
    await vm.runInContext('loadProviders()',s.ctx);
    assert.equal(s.el('providersel').value,'gemini'); }
+ // discovery never chooses a returned model or overwrites a manual one
+ { const s=setup(async(u)=>u==='/models'?resp({models:['first','second'],message:'Listed != quota'}):resp({configured:false}));
+   s.el('modelin').value='manual'; s.el('providersel').value='gemini';
+   await vm.runInContext('refreshModels(true)',s.ctx);
+   assert.equal(s.el('modelin').value,'manual'); assert.equal(s.el('modelsel').value,'');
+   s.el('modelsel').value='second'; vm.runInContext('selectDiscoveredModel()',s.ctx);
+   assert.equal(s.el('modelin').value,'second'); }
+ // provider changes preserve even a previously hinted model, and stale results are ignored
+ { let done; const s=setup(async(u)=>u==='/models'?new Promise(r=>{done=r}):resp({configured:false}));
+   s.el('modelin').value='gemini-flash-latest'; s.el('providersel').value='gemini';
+   const pending=vm.runInContext('refreshModels()',s.ctx);
+   vm.runInContext('discoveryVersion++',s.ctx); done(resp({models:['stale'],message:'stale'})); await pending;
+   assert.equal(s.el('modelsel').children.length,1); assert.equal(s.el('modelin').value,'gemini-flash-latest'); }
+ // errors leave manual entry available and render strings as text, not markup
+ { const s=setup(async(u)=>resp({message:'<error> enter manually',models:[]},false));
+   s.el('modelin').value='keep'; await vm.runInContext('refreshModels()',s.ctx);
+   assert.equal(s.el('modelin').value,'keep'); assert.equal(s.el('modelstatus').textContent,'<error> enter manually');
+   assert.equal(s.el('refreshmodels').disabled,false); }
  console.log('PASS provider picker UI');
 })().catch(e=>{console.error(e);process.exitCode=1});
