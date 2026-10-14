@@ -15,11 +15,14 @@ from flask import Flask, Response, request, render_template_string, session, red
 from agent_loop import ACTION_SCHEMA, Workspace, run_loop
 from documents import extract_text, MAX_UPLOAD
 from werkzeug.utils import secure_filename
-from task_harness import OutputBudgetExceeded, TaskManager
+from task_harness import OutputBudgetExceeded, TaskManager, MAX_RETRIES, is_transient, friendly_provider_error
+import task_harness
 
 API_URL = os.environ.get('GROK_API_URL', 'https://api.x.ai/v1/chat/completions')
 DEFAULT_MODEL = os.environ.get('GROK_MODEL', 'grok-4-fast')
 MAX_CHAT_OUTPUT_BYTES = 128000
+# Control markers wrap live retry notices in the chat stream; the page strips them.
+RETRY_MARK, RETRY_END = '\x1e', '\x1f'
 MAX_CHAT_RESPONSE_BYTES = MAX_CHAT_OUTPUT_BYTES * 6 + 65536
 SYSTEM_PROMPT = 'You are a helpful assistant. Do not claim to be a particular provider or model unless verified. Be honest about available tools.'
 ALLOWED_API_URLS = {
@@ -73,6 +76,15 @@ PAGE = r"""<!doctype html>
   #settings button { background: #1a2027; color: #d6dbe1; border: 1px solid #242c35;
                      border-radius: 8px; padding: 8px 12px; cursor: pointer; font-size: 12px; }
   #keystatus { color: #6b7480; font-size: 11px; }
+  #keymask { width: 100%; color: #8b949c; font-size: 11px; }
+  #keymask b { color: #d6dbe1; font-weight: 600; font-family: ui-monospace, Consolas, monospace; }
+  #keystatus.ok { color: #4cc38a; } #keystatus.bad { color: #e5766b; }
+  #settings button:disabled { opacity: .6; cursor: default; }
+  .dots::after { content: ''; animation: dots 1.2s steps(4, end) infinite; }
+  @keyframes dots { 0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; } }
+  .resume-btn { display: block; margin-top: 8px; background: #1a2027; color: #4cc38a; border: 1px solid #2c4a3b;
+                border-radius: 8px; padding: 8px 14px; font-size: 12px; cursor: pointer; }
+  .resume-btn:disabled { opacity: .6; }
   #skillsPanel { padding: 12px 16px; border-bottom: 1px solid #1c222a; max-height: 55vh;
                  overflow: auto; font-size: 12px; }
   #skillsPanel p { color: #8b949c; font-size: 11px; margin: 6px 0; }
@@ -157,7 +169,9 @@ PAGE = r"""<!doctype html>
     <input id="urlin" placeholder="API URL (optional, blank = auto)" autocomplete="off">
     <input id="modelin" placeholder="Model (optional, blank = auto)" autocomplete="off">
     <button onclick="saveKey()">Save</button>
-    <span id="keystatus"></span>
+    <button id="testbtn" onclick="testKey()">Test</button>
+    <span id="keystatus" role="status" aria-live="polite"></span>
+    <div id="keymask">No key saved yet.</div>
   </div>
   <section id="skillsPanel" hidden>
     <strong>Saved skills</strong>
@@ -288,7 +302,7 @@ async function send() {
   chatRunning = !isTask; updateStopButton();
   const status = document.getElementById('status');
   status.textContent = isTask ? 'Task running' : 'Replying';
-  const bubble = add('grok', ''); let full = ''; let pending = '';
+  const bubble = add('grok', ''); let full = ''; let pending = ''; let rawBuf = ''; let sawRetry = false;
   try {
     const res = await fetch(isTask ? '/task' : '/chat', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -318,9 +332,22 @@ async function send() {
           full += '[' + event.type + '] ' + event.text + '\n\n';
           bubble.textContent = full;
         }
-      } else { full += chunk; bubble.textContent = full; }
+      } else {
+        rawBuf += chunk;
+        for (;;) {  // retry notices arrive as \x1e...\x1f control segments
+          const s = rawBuf.indexOf('\x1e');
+          if (s < 0) { full += rawBuf; rawBuf = ''; break; }
+          full += rawBuf.slice(0, s);
+          const e = rawBuf.indexOf('\x1f', s);
+          if (e < 0) { rawBuf = rawBuf.slice(s); break; }
+          status.textContent = rawBuf.slice(s + 1, e); rawBuf = rawBuf.slice(e + 1); sawRetry = true;
+        }
+        if (full && sawRetry) { status.textContent = 'Replying'; sawRetry = false; }
+        bubble.textContent = full;
+      }
       scrollChat();
     }
+    if (rawBuf && rawBuf.indexOf('\x1e') < 0) full += rawBuf;
     if (!full) bubble.textContent = '[Empty reply]';
     if (!isTask) status.textContent = 'Ready';
   } catch (e) { bubble.textContent += '\n[Error: ' + e.message + ']'; status.textContent = 'Blocked'; }
@@ -370,16 +397,16 @@ async function watchTask(id, bubble) {
   if (watching.has(id)) return;
   const view = taskBubble(id, bubble); bubble = view.bubble;
   watching.add(id);
-  let after = view.after;
+  let after = view.after; let retryText = '';
   try {
     for (;;) {
       const er = await fetch('/tasks/' + id + '/events?after=' + after);
       if (!er.ok) throw new Error('Could not load task events');
       const events = await er.json();
-      for (const e of events) { if (e.seq <= after) continue; after = view.after = e.seq; if (e.type !== 'progress') bubble.textContent += '[' + e.type + '] ' + e.text + '\n'; }
+      for (const e of events) { if (e.seq <= after) continue; after = view.after = e.seq; if (e.type === 'retry') retryText = e.text; else if (e.type !== 'progress') retryText = ''; if (e.type !== 'progress') bubble.textContent += '[' + e.type + '] ' + e.text + '\n'; }
       const sr = await fetch('/tasks/' + id); if (!sr.ok) throw new Error('Could not load task status');
       const row = await sr.json();
-      document.getElementById('status').textContent = row.status + ' · step ' + row.steps;
+      document.getElementById('status').textContent = (row.status === 'running' && retryText) ? retryText : row.status + ' · step ' + row.steps;
       taskStatuses.set(id, row.status); updateStopButton();
       if (!['queued','running'].includes(row.status)) {
         // Status may have committed after the preceding events request.
@@ -396,6 +423,7 @@ async function watchTask(id, bubble) {
           if (finalEvents.length < 200) break;
         }
         collapseLog(bubble);
+        if (['blocked','interrupted','stopped'].includes(row.status)) addResumeButton(id, bubble);
         break;
       }
       await new Promise(resolve => setTimeout(resolve, 500));
@@ -423,16 +451,24 @@ async function restoreTasks(watch = true) {
     }
   } catch (e) { document.getElementById('status').textContent = e.message; }
 }
-async function resumeTask() {
-  const id = document.getElementById('taskselect').value; if (!id) return;
-  const answer = inp.value.trim();
+function addResumeButton(id, bubble) {
+  const btn = document.createElement('button'); btn.className = 'resume-btn'; btn.textContent = 'Resume task';
+  btn.addEventListener('click', async ev => { ev.stopPropagation(); btn.disabled = true; btn.textContent = 'Resuming...'; const ok = await resumeTask(id); if (!ok) { btn.disabled = false; btn.textContent = 'Resume task'; } });
+  bubble.appendChild(btn);
+}
+async function resumeTask(oneClickId) {
+  const id = oneClickId || document.getElementById('taskselect').value; if (!id) return false;
+  const answer = oneClickId ? '' : inp.value.trim();
   try {
-    const checksText = document.getElementById('checks').value.trim();
+    const checksText = oneClickId ? '' : document.getElementById('checks').value.trim();
     const res = await fetch('/tasks/' + id + '/resume', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({answer, ...(checksText ? {checks: JSON.parse(checksText)} : {})})});
-    if (!res.ok) { document.getElementById('status').textContent = await res.text(); return; }
+    if (!res.ok) { let m = await res.text(); try { m = JSON.parse(m).error || m; } catch (_) {} document.getElementById('status').textContent = 'Could not resume: ' + m; return false; }
     taskStatuses.set(id, 'queued'); updateStopButton();
-    inp.value = ''; watchTask(id, taskBubble(id).bubble).catch(e => add('grok', e.message));
-  } catch (e) { document.getElementById('status').textContent = 'Resume failed: ' + e.message; }
+    if (!oneClickId) inp.value = '';
+    document.getElementById('status').textContent = 'Resuming...';
+    const view = taskBubble(id); if (view.bubble.classList) view.bubble.classList.remove('done','open'); watchTask(id, view.bubble).catch(e => add('grok', e.message));
+    return true;
+  } catch (e) { document.getElementById('status').textContent = 'Resume failed: ' + e.message; return false; }
 }
 restoreTasks();
 
@@ -474,7 +510,35 @@ async function showFiles() {
 }
 
 function toggleSettings() {
-  document.getElementById('settings').classList.toggle('open');
+  const open = document.getElementById('settings').classList.toggle('open');
+  if (open) refreshKeyStatus();
+}
+
+function setKeyStatus(text, cls, busy) {
+  const el = document.getElementById('keystatus');
+  el.textContent = text; el.className = (cls || '') + (busy ? ' dots' : '');
+}
+async function refreshKeyStatus() {
+  const box = document.getElementById('keymask');
+  try {
+    const res = await fetch('/key_status'); if (!res.ok) return;
+    const s = await res.json();
+    box.textContent = '';
+    if (!s.configured) { box.textContent = 'No key saved yet.'; return; }
+    const b = document.createElement('b'); b.textContent = s.masked;
+    box.append('Key in use: ', b, ' (' + s.source + ') \u00b7 ' + s.model + (s.provider ? ' \u00b7 ' + s.provider : ''));
+  } catch (_) { /* leave previous text */ }
+}
+async function testKey() {
+  const btn = document.getElementById('testbtn');
+  btn.disabled = true; btn.textContent = 'Testing'; btn.classList.add('dots');
+  setKeyStatus('Sending one tiny request', '', true);
+  try {
+    const res = await fetch('/test_key', {method: 'POST'});
+    const r = await res.json();
+    setKeyStatus((r.ok ? 'OK: ' : (r.status ? 'Failed (' + r.status + '): ' : 'Failed: ')) + r.message, r.ok ? 'ok' : 'bad');
+  } catch (e) { setKeyStatus('Could not run the test: ' + e.message, 'bad'); }
+  btn.disabled = false; btn.textContent = 'Test'; btn.classList.remove('dots');
 }
 
 function toggleSidebar() {
@@ -489,8 +553,8 @@ async function saveKey() {
     body: JSON.stringify({key: keyin.value, url: urlin.value, model: modelin.value})
   });
   const st = await saveRes.text();
-  document.getElementById('keystatus').textContent = st;
-  if (saveRes.ok) keyin.value = '';
+  setKeyStatus(st, saveRes.ok ? 'ok' : 'bad');
+  if (saveRes.ok) { keyin.value = ''; refreshKeyStatus(); }
 }
 
 async function clearChat() {
@@ -629,16 +693,17 @@ def config_snapshot():
                 settings.get('model_override') or app.config['MODEL'])
 
 
-def model_reply(messages, cfg, stream=False, structured=False, response_limit=None):
+def model_reply(messages, cfg, stream=False, structured=False, response_limit=None, extra=None, timeout=(10, 45)):
     key, url, model = cfg
     if url not in ALLOWED_API_URLS:
         raise ValueError('Unsupported provider URL.')
     payload = {'model': model, 'messages': messages, 'stream': stream}
+    if extra: payload.update(extra)
     if structured:
         payload['response_format'] = {'type': 'json_schema', 'json_schema': {'name': 'task_action', 'strict': True, 'schema': ACTION_SCHEMA}}
     res = requests.post(url, headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'},
                         json=payload,
-                        stream=stream or response_limit is not None, timeout=(10, 45))
+                        stream=stream or response_limit is not None, timeout=timeout)
     try:
         res.raise_for_status()
     except requests.RequestException:
@@ -717,7 +782,18 @@ def chat():
                 answer = '(mock) got your message: ' + text
                 chunks.append(answer); complete = True; yield answer
             else:
-                with model_reply(messages, cfg, stream=True) as res:
+                res = None
+                for attempt in range(MAX_RETRIES + 1):
+                    try:
+                        res = model_reply(messages, cfg, stream=True)
+                        break
+                    except requests.RequestException as exc:
+                        if not is_transient(exc) or attempt >= MAX_RETRIES or c['stop'].is_set(): raise
+                        yield RETRY_MARK + friendly_provider_error(exc, url=cfg[1]).rstrip('.') + ', retrying %d of %d...' % (attempt + 1, MAX_RETRIES) + RETRY_END
+                        c['stop'].wait(min(task_harness.RETRY_DELAY * (attempt + 1), 4))
+                        if c['stop'].is_set(): stopped = True; break
+                if res is not None:
+                  with res:
                     for raw in iter_bounded_sse_lines(res):
                         if c['stop'].is_set():
                             stopped = True
@@ -771,11 +847,12 @@ def chat():
             c['history'] = c['history'][-24:]
             task_manager().store_history(sid, c['history'])
         except requests.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else 'unknown'
-            yield f'[Provider HTTP {status}. Check key permissions, model availability and quota.]'
+            yield '[' + friendly_provider_error(exc, url=cfg[1]) + ']'
         except ChatResponseTooLarge:
             yield '[Provider stream exceeded the response limit; partial reply was not saved.]'
-        except (requests.RequestException, ValueError, KeyError, IndexError):
+        except requests.RequestException as exc:
+            yield '[' + friendly_provider_error(exc, url=cfg[1]) + ']'
+        except (ValueError, KeyError, IndexError):
             yield '[Provider error or interrupted reply. Check key, model and quota.]'
         finally:
             c['busy'].release()
@@ -1052,6 +1129,55 @@ def download(name):
         return send_file(path, as_attachment=True)
     except ValueError:
         return Response('Invalid file path.', status=400)
+
+def mask_key(key):
+    """Server-side mask: first 4 + last 3 characters. Short keys reveal nothing."""
+    if not isinstance(key, str) or not key: return ''
+    if len(key) < 12: return '\u2022' * 8
+    return key[:4] + '\u2026' + key[-3:]
+
+
+def key_state():
+    key, url, model = config_snapshot()
+    with provider_lock:
+        saved = bool(settings.get('key_override'))
+    return {'configured': bool(key), 'masked': mask_key(key), 'source': ('saved' if saved else 'environment') if key else 'none',
+            'model': model, 'provider': 'Google Gemini' if 'google' in (urlparse(url).hostname or '') else (urlparse(url).hostname or '')}
+
+
+@app.route('/key_status')
+def key_status():
+    return key_state()
+
+
+TEST_COOLDOWN = 4.0
+
+
+@app.route('/test_key', methods=['POST'])
+def test_key():
+    """One minimal model request. Never returns the key or raw provider text."""
+    c = client()
+    now = time.monotonic()
+    with provider_lock:
+        wait = TEST_COOLDOWN - (now - c.get('last_test', -1e9))
+        if wait > 0:
+            return {'ok': False, 'status': 429, 'message': 'Wait %d seconds before testing again.' % (int(wait) + 1)}, 429
+        c['last_test'] = now
+    cfg = config_snapshot()
+    if not cfg[0]:
+        return {'ok': False, 'status': None, 'message': 'No key saved yet. Paste your key and press Save first.'}
+    try:
+        res = model_reply([{'role': 'user', 'content': 'Reply with the single word: ok'}], cfg,
+                          extra={'max_tokens': 32}, timeout=(8, 20))
+        res.close()
+        return {'ok': True, 'status': 200, 'message': 'Key works. Model ' + cfg[2] + ' replied.', 'model': cfg[2]}
+    except requests.RequestException as exc:
+        response = getattr(exc, 'response', None)
+        code = response.status_code if response is not None else None
+        return {'ok': False, 'status': code, 'message': friendly_provider_error(exc, url=cfg[1])}
+    except ValueError:
+        return {'ok': False, 'status': None, 'message': 'Unsupported provider URL.'}
+
 
 @app.route('/set_key', methods=['POST'])
 def set_key():
