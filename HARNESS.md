@@ -43,7 +43,8 @@ immutable historical source. Download and independently review important results
   monotonic cursor. Continue until fewer than 200; do not assume one batch is all.
 - `POST /tasks/ID/stop`: cooperative cancellation.
 - `POST /tasks/ID/resume` JSON `{}` or `{"answer":"..."}`: resumes only stopped,
-  interrupted or needs_input tasks. Completed/blocked/budget_exhausted are terminal.
+  interrupted, needs_input or blocked tasks (the UI shows a one-click "Resume task"
+  button on blocked/stopped/interrupted tasks). Completed/budget_exhausted are terminal.
 - `/stop` remains a compatibility stop-all-active-in-session endpoint.
 
 Ownership comes solely from the signed session cookie, never a submitted owner
@@ -101,8 +102,9 @@ Chat replies are capped at 128000 UTF-8 bytes, with the provider stream body
 capped at six times that limit plus 64 KiB; malformed SSE events are ignored, and
 incomplete or oversized replies are not saved to history.
 Transient connection/timeouts and HTTP 500/502/503/504 retry at most three
-consecutive attempts with cancellable bounded backoff; each costs a step.
-400/401/403/429 never retry. No fallback model, billing changes or quota bypass.
+consecutive times (the UI shows "retrying 2 of 3") with cancellable bounded backoff;
+each attempt costs a step. After the third retry the task is `blocked` with a plain
+message and can be resumed. 400/401/403/404/429 never retry. No fallback model, billing changes or quota bypass.
 Malformed actions consume steps without tools. Repeated same failed required
 arguments stop after two failures. Successful tool reads reset that guard.
 
