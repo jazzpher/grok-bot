@@ -8,10 +8,11 @@ class ReviewFixTests(unittest.TestCase):
     setUp = test_harness.HarnessTests.setUp
     manager = test_harness.HarnessTests.manager
     wait = test_harness.HarnessTests.wait
+    wait_worker_gone = test_harness.HarnessTests.wait_worker_gone
     def test_missing_checks_resume_validates_persists_and_keeps_budgets(self):
         m=self.manager()
         tid=m.submit('alice','make output',[],lambda _:action('done',text='unchecked'),budgets={'steps':5})
-        original=self.wait(m,tid); m.threads[tid].join(2)
+        original=self.wait(m,tid); self.wait_worker_gone(m,tid)
         checks=[{'type':'file_text','path':'out','text':'ok'}]
         self.assertFalse(m.resume(tid,'bob',lambda _: '',checks=checks))
         with self.assertRaises(ValueError):
@@ -29,14 +30,14 @@ class ReviewFixTests(unittest.TestCase):
     def test_existing_checks_cannot_be_changed_on_resume(self):
         m=self.manager(); checks=[{'type':'file_text','path':'out','text':'ok'}]
         tid=m.submit('alice','wait',[],lambda _:action('need_input',text='question'),checks=checks)
-        self.wait(m,tid); m.threads[tid].join(2)
+        self.wait(m,tid); self.wait_worker_gone(m,tid)
         with self.assertRaises(ValueError): m.resume(tid,'alice',lambda _: '',checks=[{'type':'file_text','path':'out','text':'bad'}])
         self.assertEqual(m.get(tid,'alice')['checks'],checks)
 
     def test_checks_resume_race_only_one_contract_is_admitted(self):
         import concurrent.futures, threading
         m=self.manager(); tid=m.submit('alice','wait',[],lambda _:action('need_input',text='checks'))
-        self.wait(m,tid); m.threads[tid].join(2)
+        self.wait(m,tid); self.wait_worker_gone(m,tid)
         gate=threading.Event()
         def provider(_): gate.wait(2); return action('need_input',text='wait')
         checks=[{'type':'file_text','path':'out','text':'ok'}]
