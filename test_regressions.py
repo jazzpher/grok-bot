@@ -126,6 +126,16 @@ class CopyCompletionTests(unittest.TestCase):
 
 
 class ByteCopyTests(CopyCompletionTests):
+    def setUp(self):
+        super().setUp()
+        # Limits are environment-configurable since grokbot 0.2 (GROK_MAX_FILE_BYTES etc.); pin the
+        # historical values so the bound checks below stay meaningful.
+        import grokbot.config as gconfig
+        for name, value in (('MAX_FILE_BYTES', 32000), ('MAX_WORKSPACE_BYTES', 256 * 1024), ('MAX_FILES', 25)):
+            patcher = patch.object(gconfig, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_copy_preserves_crlf_and_lone_cr(self):
         for raw in (b'first\r\nsecond\r\n', b'first\rsecond\r'):
             with self.subTest(raw=raw):

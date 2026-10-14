@@ -115,7 +115,9 @@ class LoopTests(unittest.TestCase):
         for expression in ['__import__("os")','2 ** 999999', '1/0']:
             with self.assertRaises(ToolError): calculate(expression)
     def test_file_limits(self):
-        with self.assertRaises(ToolError): self.workspace.execute({'action':'write_file','path':'x','content':'x'*32001})
+        import grokbot.config as gconfig
+        with patch.object(gconfig, 'MAX_FILE_BYTES', 32000), self.assertRaises(ToolError):
+            self.workspace.execute({'action':'write_file','path':'x','content':'x'*32001})
     def test_upload_directory_aliases_are_reserved_for_writes_and_copies(self):
         self.workspace.execute({'action':'write_file','path':'uploads/source.txt','content':'original'}, allow_upload=True)
         for path in ('Uploads/source.txt', 'uploads./source.txt', 'uploads /source.txt', '. /uploads/source.txt'):

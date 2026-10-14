@@ -8,6 +8,7 @@ import re
 import os
 import tempfile
 from skills import SkillStore
+from grokbot import config as _cfg
 
 
 # documents pulls in pypdf; import it only when a .docx is actually handled.
@@ -190,11 +191,11 @@ class Workspace:
         if kind == 'list_files':
             files = sorted(p.relative_to(self.root).as_posix() for p in self.root.rglob('*')
                            if p.is_file() and not p.is_symlink())
-            return json.dumps(files[:100])
+            return json.dumps(files[:500])
         if kind == 'read_file':
             path = self.path(action.get('path'))
-            if not path.is_file() or path.stat().st_size > 32000:
-                raise ToolError('File missing or exceeds 32 KB.')
+            if not path.is_file() or path.stat().st_size > _cfg.MAX_READ_BYTES:
+                raise ToolError('File missing or exceeds the read limit (%d KB).' % (_cfg.MAX_READ_BYTES // 1024))
             if path.suffix.lower() == '.docx':
                 try:
                     content = extract_text(path.name, path.read_bytes())
@@ -208,18 +209,18 @@ class Workspace:
             source = self.path(action.get('source_path'))
             target = self.path(action.get('path'))
             for path in (source, target):
-                if not path.is_file() or path.stat().st_size > 32000:
-                    raise ToolError('File missing or exceeds 32 KB.')
+                if not path.is_file() or path.stat().st_size > _cfg.MAX_READ_BYTES:
+                    raise ToolError('File missing or exceeds the read limit (%d KB).' % (_cfg.MAX_READ_BYTES // 1024))
             return 'MATCH: exact bytes are identical.' if source.read_bytes() == target.read_bytes() else 'MISMATCH: file bytes differ. Do not claim verification.'
         if kind == 'copy_file':
             source = self.path(action.get('source_path'))
-            if not source.is_file() or source.stat().st_size > 32000:
-                raise ToolError('Source missing or exceeds 32 KB.')
+            if not source.is_file() or source.stat().st_size > _cfg.MAX_FILE_BYTES:
+                raise ToolError('Source missing or exceeds the file limit.')
             return self._write_bytes(action.get('path'), source.read_bytes())
         if kind == 'write_file':
             content = action.get('content')
             if not isinstance(content, str):
-                raise ToolError('Text files are limited to 32 KB.')
+                raise ToolError('write_file content must be a string.')
             if isinstance(action.get('path'), str) and action['path'].lower().endswith('.docx'):
                 raise ToolError('A .docx cannot be written as plain text. Use write_docx for Word documents.')
             return self._write_bytes(action.get('path'), content.encode('utf-8'), allow_upload)
@@ -255,15 +256,15 @@ class Workspace:
         path = self.path(name)
         if is_upload_path(path.relative_to(self.root)) and not allow_upload:
             raise ToolError('Uploaded documents are read-only. Write a separate output file.')
-        if len(content) > 32000:
-            raise ToolError('Text files are limited to 32 KB.')
+        if len(content) > _cfg.MAX_FILE_BYTES:
+            raise ToolError('Files are limited to %d MB.' % max(1, _cfg.MAX_FILE_BYTES // (1024 * 1024)))
         current = list(self.root.rglob('*'))
-        if not path.exists() and sum(p.is_file() for p in current) >= 25:
-            raise ToolError('Workspace file limit reached (25).')
+        if not path.exists() and sum(p.is_file() for p in current) >= _cfg.MAX_FILES:
+            raise ToolError('Workspace file limit reached (%d).' % _cfg.MAX_FILES)
         used = sum(p.stat().st_size for p in current if p.is_file() and not p.is_symlink())
         old = path.stat().st_size if path.is_file() else 0
-        if used - old + len(content) > 256000:
-            raise ToolError('Workspace storage limit reached (256 KB).')
+        if used - old + len(content) > _cfg.MAX_WORKSPACE_BYTES:
+            raise ToolError('Workspace storage limit reached (%d MB).' % max(1, _cfg.MAX_WORKSPACE_BYTES // (1024 * 1024)))
         path.parent.mkdir(parents=True, exist_ok=True)
         candidate = None
         try:

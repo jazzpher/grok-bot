@@ -1,5 +1,5 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
-const code=fs.readFileSync(__dirname+'/webui.py','utf8').split('<script>')[1].split('</script>')[0];
+const code=fs.readFileSync(__dirname+'/static/app.js','utf8');
 function setup(fetch){const elements={};
  const mk=()=>({value:'',textContent:'',children:[],disabled:false,isConnected:true,style:{},className:'',
   classList:{_s:new Set(),add(...a){a.forEach(x=>this._s.add(x))},remove(...a){a.forEach(x=>this._s.delete(x))},toggle(x){this._s.has(x)?this._s.delete(x):this._s.add(x);return this._s.has(x)},contains(x){return this._s.has(x)}},
@@ -7,7 +7,7 @@ function setup(fetch){const elements={};
   addEventListener(n,f){this[n]=f}});
  const el=id=>elements[id]||=mk();
  const ctx={console,Set,Map,JSON,Promise,TextDecoder,fetch,setTimeout:f=>f(),document:{getElementById:el,createElement:mk}};
- vm.createContext(ctx);for(const n of ['keyin','urlin','modelin','inp','wrap','chat'])ctx[n]=el(n);vm.runInContext(code.replace('restoreTasks();','').replace('restoreHistory();',''),ctx);return {ctx,el}}
+ vm.createContext(ctx);for(const n of ['keyin','urlin','modelin','inp','wrap','chat'])ctx[n]=el(n);vm.runInContext(code.replace('restoreTasks();','').replace('restoreHistory();','').replace('loadPolicy();','').replace('refreshKeyStatus();\n',''),ctx);return {ctx,el}}
 const resp=(obj,ok=true)=>({ok,json:async()=>obj,text:async()=>typeof obj==='string'?obj:JSON.stringify(obj)});
 (async()=>{
  // Test button: shows OK / failure text, key never shown, button restored
@@ -43,13 +43,28 @@ const resp=(obj,ok=true)=>({ok,json:async()=>obj,text:async()=>typeof obj==='str
    const orig=s.el('status'); Object.defineProperty(orig,'textContent',{get(){return this._t||''},set(v){this._t=v;seen.push(v)}});
    s.ctx.bubble=s.el('b3'); await vm.runInContext("watchTask('t3',bubble)",s.ctx);
    assert(seen.includes('Google is busy right now, retrying 2 of 3...'),JSON.stringify(seen)); }
- // chat stream: retry notices split across chunks never leak into the reply, status shows them
- { const enc=new TextEncoder(); const parts=['\x1eGoogle is bu','sy right now, retrying 1 of 3...\x1f','\x1eretrying 2 of 3...\x1f','Hel','lo \x1e','x\x1fworld'];
-   let i=0; const s=setup(async(u)=>({ok:true,body:{getReader:()=>({read:async()=>i<parts.length?{done:false,value:enc.encode(parts[i++])}:{done:true}})}}));
+ // agent stream: NDJSON events split across chunks; retry notices go to the status line, never into the reply
+ { const enc=new TextEncoder(); const lines=[JSON.stringify({type:'conversation',id:'c1',title:'hi'}),JSON.stringify({type:'retry',text:'Google is busy right now, retrying 1 of 3...'}),JSON.stringify({type:'retry',text:'retrying 2 of 3...'}),JSON.stringify({type:'text',delta:'Hel'}),JSON.stringify({type:'text',delta:'lo world'}),JSON.stringify({type:'done',status:'completed',steps:1,tool_calls:0,usage:{}})].join('\n')+'\n';
+   const parts=[lines.slice(0,40),lines.slice(40,131),lines.slice(131)];
+   let i=0; const s=setup(async(u)=>u==='/agent'?({ok:true,body:{getReader:()=>({read:async()=>i<parts.length?{done:false,value:enc.encode(parts[i++])}:{done:true}})}}):resp([]));
    s.ctx.TextEncoder=TextEncoder; const seen=[]; const st=s.el('status'); Object.defineProperty(st,'textContent',{get(){return this._t||''},set(v){this._t=v;seen.push(v)}});
-   s.el('mode').value='chat'; s.el('in').value='hi';
+   s.el('in').value='hi';
    await vm.runInContext('send()',s.ctx);
-   const bub=s.el('chat').children[s.el('chat').children.length-1]; assert.equal(bub.textContent,'Hello world'); assert(!/[\x1e\x1f]/.test(bub.textContent));
-   assert(seen.includes('Google is busy right now, retrying 1 of 3...'),JSON.stringify(seen)); assert(seen.includes('retrying 2 of 3...')); assert.equal(seen[seen.length-1],'Ready'); }
+   const bubbles=s.el('chat').children.filter(c=>typeof c.className==='string'&&c.className.includes('grok'));
+   const bub=bubbles[bubbles.length-1]; assert.equal(bub.textContent,'Hello world');
+   assert(seen.includes('Google is busy right now, retrying 1 of 3...'),JSON.stringify(seen)); assert(seen.includes('retrying 2 of 3...')); assert.equal(seen[seen.length-1],'Ready');
+   assert.equal(vm.runInContext('currentConversation',s.ctx),'c1','conversation id from the stream is adopted'); }
+ // tool cards: tool_start/tool_end render a card with the command and its output; approval_required renders buttons that post the decision
+ { const enc=new TextEncoder(); const events=[{type:'tool_start',id:'t1',name:'run_command',arguments:{command:'ls -la'}},{type:'tool_end',id:'t1',name:'run_command',ok:true,output:'total 0',duration:0.2},{type:'approval_required',id:'a1',tool:'write_file',arguments:{path:'x.txt'},reason:'Sandbox is read-only',always_pattern:'write_file:*'},{type:'text',delta:'done'},{type:'done',status:'completed'}];
+   const body=events.map(e=>JSON.stringify(e)).join('\n')+'\n'; let sent=false; const posts=[];
+   const s=setup(async(u,o)=>{ if(u==='/agent') return {ok:true,body:{getReader:()=>({read:async()=>sent?{done:true}:(sent=true,{done:false,value:enc.encode(body)})})}}; if(u==='/agent/approve'){posts.push(JSON.parse(o.body));return resp({ok:true})} return resp([]);});
+   s.el('in').value='run it'; await vm.runInContext('send()',s.ctx);
+   const kids=s.el('chat').children; const card=kids.find(c=>typeof c.className==='string'&&c.className.startsWith('toolcard'));
+   assert(card,'tool card rendered'); assert(card.className.includes('ok'),card.className);
+   const flat=n=>[n.textContent||'',...(n.children||[]).map(flat)].join('|');
+   assert(flat(card).includes('ls -la'),flat(card)); assert(flat(card).includes('total 0'),flat(card));
+   const approval=kids.find(c=>c.className==='approval'); assert(approval,'approval card rendered');
+   const btns=approval.children.find(c=>c.className==='btns'); const allow=btns.children.find(b=>b.className==='allow');
+   await allow.click(); assert.deepEqual(posts[0],{id:'a1',decision:'allow'}); }
  console.log('PASS key/test/resume UI');
 })().catch(e=>{console.error(e);process.exitCode=1});

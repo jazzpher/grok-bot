@@ -1,6 +1,6 @@
 // Execute the shipped inline UI with deterministic DOM/network/timer seams.
 const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
-const code = fs.readFileSync(__dirname + '/webui.py', 'utf8').split('<script>')[1].split('</script>')[0];
+const code = fs.readFileSync(__dirname + '/static/app.js', 'utf8');
 function setup(fetch) {
   const elements = {}, timers = [];
   const el = id => elements[id] ||= {value:'', textContent:'', children:[], disabled:id === 'stop', isConnected:true,
@@ -9,7 +9,7 @@ function setup(fetch) {
   const ctx = {console, Set, Map, JSON, Promise, TextDecoder, fetch, setTimeout:fn => timers.push(fn),
     document:{getElementById:el, createElement:() => ({textContent:'', isConnected:true, style:{}})}};
   vm.createContext(ctx);
-  vm.runInContext(code.replace('restoreTasks();','').replace('restoreHistory();',''), ctx);
+  vm.runInContext(code.replace('restoreTasks();','').replace('restoreHistory();','').replace('loadPolicy();','').replace('refreshKeyStatus();\n',''), ctx);
   return {ctx, el, timers, run:expr => vm.runInContext(expr, ctx)};
 }
 const response = obj => ({ok:true, json:async() => obj, text:async() => JSON.stringify(obj)});
@@ -62,14 +62,14 @@ test('Stop reports inactive, HTTP, and network results truthfully', async() => {
     await s.run('stopTask()'); assert.equal(s.el('status').textContent, expected);
   }
 });
-test('active chat remains stoppable across task refresh and selection', async() => {
+test('active agent reply remains stoppable across task refresh and selection', async() => {
   let release; const calls = [];
   const s = setup(async(url) => {
     calls.push(url);
-    if(url === '/chat') return {ok:true, body:{getReader:() => ({read:() => new Promise(r => {release = r;})})}};
+    if(url === '/agent') return {ok:true, body:{getReader:() => ({read:() => new Promise(r => {release = r;})})}};
     return response(url === '/stop' ? {requested:true} : url === '/tasks' || url.includes('/events') ? [] : {status:'completed', steps:1});
   });
-  s.el('in').value = 'hello'; s.el('mode').value = 'chat';
+  s.el('in').value = 'hello';
   const sending = s.run('send()'); await tick();
   assert.equal(s.el('stop').disabled, false, 'chat Stop enabled');
   await s.run('restoreTasks(false)'); s.el('taskselect').value = 'old'; await s.el('taskselect').change();

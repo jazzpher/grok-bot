@@ -1,8 +1,42 @@
 # grok-bot
 
-A small Python web chat with a bounded task agent. Use Gemini or xAI through
-an OpenAI-compatible endpoint. The name does not mean it runs the Grok model:
-the provider and model you configure determine what answers.
+A local, tool-using chat/coding agent with a web UI and a CLI, for any
+OpenAI-compatible provider (Gemini, xAI, NVIDIA NIM, OpenRouter, Groq, Cerebras,
+Mistral, DeepSeek, or a custom https endpoint). The name does not mean it runs
+the Grok model: the provider and model you configure determine what answers.
+
+**What the agent can do (0.2):** read, search and edit files in a per-session
+workspace; run shell commands in a sandbox with a Codex-style policy
+(`read-only` / `workspace-write` / `full-access` × `on-request` / `never`
+approvals, persisted "always allow" rules); fetch pages and search the web;
+remember and reuse skills; keep multiple searchable conversations with automatic
+context compaction; stream tool calls as expandable cards with Markdown
+rendering. Native tool calling is used when the provider supports it, with an
+automatic JSON-protocol fallback when it does not. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the honest
+[docs/LIMITATIONS.md](docs/LIMITATIONS.md).
+
+```
+python -m grokbot chat                          # terminal agent in the current directory
+python -m grokbot exec "run the tests and fix the failure" --json   # CI / scripts
+python webui.py                                 # web UI on http://127.0.0.1:5000
+python -m grokbot exec --mock "hello"           # offline smoke test, no key needed
+```
+
+Sandbox backends: `subprocess` (default — commands run as your user inside the
+workspace with keys scrubbed from the environment; **not** an isolation boundary)
+or `docker` (`GROK_SANDBOX_BACKEND=docker`, no network unless the policy allows it,
+workspace bind-mounted, read-only root). `docker compose up` runs the whole app in a
+container, which is the recommended way to let it work on untrusted code.
+
+Configuration (environment): `GROK_API_KEY`, `GROK_API_URL`, `GROK_MODEL`,
+`GROK_SANDBOX_BACKEND`, `GROK_SANDBOX_IMAGE`, `GROK_MAX_STEPS` (default 40),
+`GROK_CONTEXT_TOKENS` (default 128000, auto-filled from the model list when
+available), `GROK_SEARCH_BACKEND` (`auto`/`tavily`/`brave`/`searxng`/`duckduckgo`/`off`)
+with `TAVILY_API_KEY` / `BRAVE_API_KEY` / `GROK_SEARXNG_URL`, `GROK_MAX_FILE_BYTES`
+(10 MB), `GROK_MAX_WORKSPACE_BYTES` (500 MB), `GROK_MAX_FILES` (2000). Project
+rules in `AGENTS.md` / `GROKBOT.md` / `CLAUDE.md` at the workspace root are added to
+the system prompt.
 
 ## Run locally
 
@@ -14,11 +48,13 @@ export GROK_MODEL='gemini-flash-latest'
 python webui.py
 ```
 
-Open http://127.0.0.1:5000. Chat mode streams replies as before. Task loop mode
-plans, uses a tool, sees its output and chooses the next step in a durable
-background worker. [HARNESS.md](HARNESS.md) documents checks, resume, API,
-budgets, persistence, retention and deployment limits. Completion requires
-explicit supported artifact checks; a budget stop is never success.
+Open http://127.0.0.1:5000. The composer talks to the unified agent (`POST /agent`):
+replies stream as Markdown, tool calls appear as cards, and anything that crosses
+the sandbox policy pauses for your approval. **Advanced → Run as durable background
+task** still uses the original restart-safe harness with explicit artifact checks;
+[HARNESS.md](HARNESS.md) documents checks, resume, API, budgets, persistence,
+retention and deployment limits. Completion there requires explicit supported
+artifact checks; a budget stop is never success.
 
 Settings has a provider picker: choose a trusted OpenAI-compatible provider
 (Google Gemini, NVIDIA NIM, OpenRouter, Groq, Cerebras, Mistral, DeepSeek, xAI
@@ -102,13 +138,15 @@ Example: "Calculate 17 x 23, save the result in answer.txt, and read it back
 to check it." Supply checks JSON `[{"type":"file_text","path":"answer.txt","text":"391"}]`.
 Click Workspace files to download the result.
 
-This is NOT a browser/computer-control agent. It cannot run shell commands,
-install packages, browse the web, send messages, buy things, or reach your
-computer's files. Completion verifies only the explicit supported byte checks,
-not every possible semantic goal. Review generated content.
+The section above describes the durable background harness. The interactive agent
+can additionally run shell commands (under the sandbox policy), fetch pages and
+search the web; it still cannot control your browser, send messages, buy things,
+or reach files outside its workspace unless you choose `full-access`. Completion of
+background tasks verifies only the explicit supported byte checks, not every
+possible semantic goal. Review generated content.
 
-Files are limited to 25 per session, 32 KB per file and 256 KB total. Paths
-cannot escape the workspace. Existing files in that workspace can be
+Files are limited per session (defaults: 2000 files, 10 MB per file, 500 MB
+total; configurable with `GROK_MAX_*`). Paths cannot escape the workspace. Existing files in that workspace can be
 replaced by a task. Download important results. New chat clears only your
 conversation, not workspace files or task evidence. Last 24 chat entries and
 task trajectories persist in SQLite. Set a stable GROK_SESSION_SECRET to keep
