@@ -228,9 +228,10 @@ class HarnessTests(unittest.TestCase):
         m = self.manager()
         tid = m.submit('alice', 'Wait', [], lambda _: '[]', budgets={'steps': 3})
         row = self.wait(m, tid)
-        self.assertEqual(row['status'], 'blocked')
+        self.assertEqual(row['status'], 'budget_exhausted')
         self.assertEqual(row['state']['steps'], 0)
-        self.assertEqual(row['state']['invalid'], 6)
+        self.assertEqual(row['state']['invalid'], 3)
+        self.assertEqual(row['state']['attempts'], 3)
         self.assertEqual(row['state']['written'], [])
 
     def test_exact_copy_verification_preserves_bytes(self):

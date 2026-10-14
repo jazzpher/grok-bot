@@ -21,7 +21,7 @@ the checks JSON field, for example:
 [{"type":"file_text","path":"answer.txt","text":"391"}]
 ```
 
-Only `file_text` (exact UTF-8 bytes) and `exact_copy` (`source_path`, `path`, current
+Only `file_text` (exact UTF-8 bytes for text files; exact extracted text for DOCX) and `exact_copy` (`source_path`, `path`, current
 bounded byte equality) are supported. Unsupported check types return 400. Without
 an explicit check a proposed completion becomes `needs_input`, not a claim of
 success. If the original checks are empty, enter nonempty checks JSON and click
@@ -35,7 +35,7 @@ immutable historical source. Download and independently review important results
 
 ## API
 
-- `POST /task` JSON: `message`, optional `checks`, optional lower `budgets`; 202
+- `POST /task` JSON: `message`, optional `requirements` text (8 KB), optional `checks`, optional lower `budgets`; 202
   returns `id`, `status_url`. This replaces the old request-bound NDJSON protocol.
 - `GET /tasks`: most recent 50 tasks for this session.
 - `GET /tasks/ID`: status and cumulative counters.
@@ -103,12 +103,12 @@ capped at six times that limit plus 64 KiB; malformed SSE events are ignored, an
 incomplete or oversized replies are not saved to history.
 Transient connection/timeouts and HTTP 500/502/503/504 retry at most three
 consecutive times (the UI shows "retrying 2 of 3") with cancellable bounded backoff;
-each attempt costs a step. After the third retry the task is `blocked` with a plain
+each attempt consumes the attempt budget. After the third retry the task is `blocked` with a plain
 message and can be resumed. 400/401/403/404/429 never retry. No fallback model, billing changes or quota bypass.
-Malformed actions consume steps without tools. Repeated same failed required
+Malformed actions consume attempts without tools (valid-action steps remain separate). Repeated same failed required
 arguments stop after two failures. Successful tool reads reset that guard.
 
-Context compaction creates a bounded provider view retaining rules, original goal,
+Context compaction creates a bounded provider view retaining rules, original goal, requirements, checks and cumulative clarifications (12 KB),
 artifact sets/counters and recent evidence. Full original messages remain in
 SQLite. It is deterministic omission, not a model-written semantic summary;
 older omissions are disclosed and artifacts should be reread. If immutable

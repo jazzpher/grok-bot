@@ -81,7 +81,10 @@ print('PASS simulated Windows import and exclusivity')
         checks=[{'type':'file_text','path':'out','text':'ok'}]
         tid=m.submit('alice','verify',[],lambda _:action('done',text='FINAL_SENTINEL'),checks=checks)
         self.assertEqual(self.wait(m,tid)['status'],'completed')
-        self.assertIn({'type':'result','text':'FINAL_SENTINEL','step':1},[{k:v for k,v in e.items() if k!='seq'} for e in m.events(tid,'alice')])
+        results = [e for e in m.events(tid,'alice') if e['type']=='result']
+        self.assertEqual(len(results), 1)
+        self.assertIn('Only these checks were verified', results[0]['text'])
+        self.assertNotIn('FINAL_SENTINEL', results[0]['text'])
         tid=m.submit('alice','verify',[],lambda _:action('done',text='UNCHECKED'),checks=[],budgets={'steps':2})
         self.wait(m,tid)
         self.assertFalse(any(e['type']=='result' for e in m.events(tid,'alice')))

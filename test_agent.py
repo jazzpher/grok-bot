@@ -95,9 +95,9 @@ class LoopTests(unittest.TestCase):
         self.assertIn('Choices:',seen[0]['content'])
     def test_bad_json_budget(self):
         events=list(run_loop('goal',[],self.workspace,lambda _: 'not JSON',lambda:False,2))
-        # Invalid replies no longer burn steps; they stop at a separate small cap.
-        self.assertEqual(events[-1]['type'],'blocked')
-        self.assertEqual(sum(e['type']=='error' for e in events),5)
+        # Invalid replies do not execute tools, but actual calls consume budget.
+        self.assertEqual(events[-1]['type'],'limit')
+        self.assertEqual(sum(e['type']=='error' for e in events),2)
     def test_provider_error(self):
         def fail(_): raise RuntimeError('secret api text')
         events=list(run_loop('goal',[],self.workspace,fail,lambda:False))
