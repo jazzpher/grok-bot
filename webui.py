@@ -103,7 +103,7 @@ PAGE = r"""<!doctype html>
 </div>
 <section id="skillsPanel" hidden style="padding:12px 16px;border-block:1px solid #333;max-height:55vh;overflow:auto">
 <strong>Saved skills</strong>
-<p>Reusable workflows, private to this browser session. Task loop can save and load them. No background model calls; skill actions use normal task steps. New chat keeps skills. Agent-created skills become stale after 14 unused days and archive after 30; pinned, manually created and legacy skills are never auto-archived. Archived files remain on disk and can be restored.</p>
+<p>Reusable workflows, private to this browser session. Max 500 non-archived skills, 12 KB each. Archives do not use a slot; restoring needs a free slot. Task loop can save and load them. No background model calls; skill actions use normal task steps. New chat keeps skills. Agent-created skills become stale after 14 unused days and archive after 30; pinned, manually created and legacy skills are never auto-archived. Archived files remain on disk and can be restored.</p>
 <select id="skillselect" aria-label="Saved skill" onchange="loadSkill()"><option value="">New skill</option></select>
 <button onclick="refreshSkills()">Refresh</button>
 <button onclick="newSkill()">New skill</button>
@@ -145,7 +145,7 @@ async function refreshSkills() {
     const blank = document.createElement('option'); blank.value = ''; blank.textContent = 'New skill'; sel.appendChild(blank);
     for (const row of rows) { const op = document.createElement('option'); op.value = row.name; op.textContent = row.name + ' [' + row.status + '] - ' + row.description; sel.appendChild(op); }
     sel.value = rows.some(r => r.name === selected) ? selected : '';
-    document.getElementById('skillstatus').textContent = rows.length + ' saved skills';
+    document.getElementById('skillstatus').textContent = rows.filter(r => r.status !== 'archived').length + '/500 non-archived, ' + rows.filter(r => r.status === 'archived').length + ' archived';
   } catch(e) { document.getElementById('skillstatus').textContent = e.message; }
 }
 async function toggleSkills() {
@@ -618,7 +618,7 @@ def chat():
         provider_error = False
         incomplete_finish = False
         try:
-            messages = [{'role': 'system', 'content': SYSTEM_PROMPT + '\n' + c['workspace'].skills.index_context()}, *c['history'][-24:], *upload_context(c), {'role': 'user', 'content': text}]
+            messages = [{'role': 'system', 'content': SYSTEM_PROMPT + '\n' + c['workspace'].skills.index_context(text)}, *c['history'][-24:], *upload_context(c), {'role': 'user', 'content': text}]
             if app.config['MOCK'] and not cfg[0]:
                 answer = '(mock) got your message: ' + text
                 chunks.append(answer); complete = True; yield answer
