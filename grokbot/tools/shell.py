@@ -24,14 +24,25 @@ def command_approval(ctx, arguments):
     """Reason string when the command crosses the sandbox boundary, else None."""
     command = str(arguments.get('command', ''))
     policy = _policy(ctx)
+    refused = sandbox.hardline_reason(command)
+    if refused:
+        raise ToolError(refused)
+    backend = _backend(ctx)
+    # Without an isolated backend (no Docker) nothing confines a command, so every command asks first, in every
+    # mode, and saved "always allow" rules do not apply. Only the explicit full-access + never policy skips it.
+    ctx.extras['strict_approval'] = bool(not backend.isolated and not policy.yolo)
     if policy.yolo:
         return None
+    if ctx.extras['strict_approval']:
+        why = 'No Docker sandbox, so this command would run directly on your computer; every command needs your approval.'
+        if sandbox.escapes_workspace(command, ctx.workspace.root):
+            why += ' It also references paths outside the workspace.'
+        return why
     destructive = sandbox.destructive_reason(command)
     if destructive:
         return destructive
     if policy.mode == 'read-only':
         return None if sandbox.is_read_only_command(command) else 'Sandbox is read-only; only inspection commands run without approval.'
-    backend = _backend(ctx)
     if policy.mode == 'workspace-write':
         if not backend.isolated:
             if sandbox.escapes_workspace(command, ctx.workspace.root):
@@ -57,6 +68,9 @@ def register(registry):
         command = command.strip()
         if not command:
             raise ToolError('command must not be empty.')
+        refused = sandbox.hardline_reason(command)
+        if refused:
+            raise ToolError(refused)
         policy = _policy(ctx)
         backend = _backend(ctx)
         timeout = max(1, min(int(timeout or config.COMMAND_TIMEOUT), config.COMMAND_TIMEOUT * 5))
