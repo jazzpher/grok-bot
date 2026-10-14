@@ -14,12 +14,17 @@ except ImportError:  # Windows: lock the first byte, never silently skip exclusi
     fcntl = None
     import msvcrt
 import hashlib
+import inspect
 
-from agent_loop import RULES, ACTION_FIELDS, Workspace, ToolError, parse_action
+from agent_loop import RULES, ACTION_FIELDS, Workspace, ToolError, is_upload_path, parse_action
 
 ACTIVE = ('queued', 'running')
 RESUMABLE = ('stopped', 'interrupted', 'needs_input')
 DEFAULT_BUDGETS = {'steps': 12, 'elapsed': 300, 'output': 128000, 'context': 24000}
+
+
+class OutputBudgetExceeded(Exception):
+    """Provider output was larger than the remaining per-task budget."""
 
 
 class TaskManager:
@@ -44,6 +49,7 @@ class TaskManager:
         self.lock = threading.RLock()
         self.threads = {}
         self.stops = {}
+        self.closing = False
         self.db = sqlite3.connect(self.database, check_same_thread=False)
         os.chmod(self.database, 0o600)
         self.db.executescript('''
@@ -128,7 +134,8 @@ class TaskManager:
             else:
                 source = workspace.path(c.get('source_path'))
                 target = workspace.path(c['path'])
-                if source == target or pathlib.Path(c['path']).parts[:1] == ('uploads',):
+                if (source == target or is_upload_path(c['path'])
+                        or is_upload_path(target.relative_to(workspace.root))):
                     raise ValueError('Copy target must be separate and writable.')
 
     def submit(self, owner, goal, history, call_model, checks=None, budgets=None):
@@ -158,7 +165,7 @@ class TaskManager:
                  'failure_signature': None, 'failure_count': 0}
         now = time.time()
         with self.lock, self.db:
-            if self.closed or self.busy(owner) or sum(t.is_alive() for t in self.threads.values()) >= 4:
+            if self.closed or self.closing or self.busy(owner) or sum(t.is_alive() for t in self.threads.values()) >= 4:
                 raise RuntimeError('This session is already running or shutting down.')
             self.db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?)',
                             (tid, owner, 'queued', goal, json.dumps(checks), json.dumps(state), now, now))
@@ -167,9 +174,18 @@ class TaskManager:
 
     def _start(self, tid, owner, call_model):
         self.stops[tid] = threading.Event()
-        thread = threading.Thread(target=self._run, args=(tid, owner, call_model), daemon=True)
+        thread = threading.Thread(target=self._run_and_cleanup, args=(tid, owner, call_model), daemon=True)
         self.threads[tid] = thread
         thread.start()
+
+    def _run_and_cleanup(self, tid, owner, call_model):
+        try:
+            self._run(tid, owner, call_model)
+        finally:
+            with self.lock:
+                if self.threads.get(tid) is threading.current_thread():
+                    self.threads.pop(tid, None)
+                self.stops.pop(tid, None)
 
     def stop(self, tid, owner):
         with self.lock:
@@ -183,7 +199,7 @@ class TaskManager:
         with self.lock:
             row = self.get(tid, owner)
             thread = self.threads.get(tid)
-            if (self.closed or not row or row['status'] not in RESUMABLE or self.busy(owner)
+            if (self.closed or self.closing or not row or row['status'] not in RESUMABLE or self.busy(owner)
                     or (thread and thread.is_alive()) or sum(t.is_alive() for t in self.threads.values()) >= 4):
                 return False
             if checks is not None:
@@ -215,8 +231,9 @@ class TaskManager:
                 digest = hashlib.sha256(a['content'].encode('utf-8')).hexdigest()
             if digest is None or not target.is_file() or target.stat().st_size > 32000 or hashlib.sha256(target.read_bytes()).hexdigest() != digest:
                 raise ToolError('Interrupted write outcome cannot be verified. No action replayed; inspect files and start a new task.')
-            workspace.written.add(a['path'])
-            workspace.checked.discard(a['path'])
+            name = target.relative_to(workspace.root).as_posix()
+            workspace.written.add(name)
+            workspace.checked.discard(name)
         state['pending'] = None
         state['written'] = sorted(workspace.written)
         state['checked'] = sorted(workspace.checked)
@@ -245,9 +262,6 @@ class TaskManager:
     def _run(self, tid, owner, call_model):
         row = self.get(tid, owner)
         state = row['state']
-        workspace = Workspace(self.workspaces / owner)
-        workspace.written = set(state['written'])
-        workspace.checked = set(state['checked'])
         started = time.monotonic()
         elapsed_before = state['elapsed']
         def finish(status, text):
@@ -258,6 +272,13 @@ class TaskManager:
             return (state['elapsed'] >= state['budgets']['elapsed']
                     or state['output'] >= state['budgets']['output'])
         try:
+            workspace = Workspace(self.workspaces / owner)
+            workspace.written = {workspace.path(name).relative_to(workspace.root).as_posix()
+                                 for name in state['written']}
+            workspace.checked = {workspace.path(name).relative_to(workspace.root).as_posix()
+                                 for name in state['checked']}
+            state['written'] = sorted(workspace.written)
+            state['checked'] = sorted(workspace.checked)
             self.save(tid, 'running', state, {'type': 'status', 'text': 'Running'})
             self._reconcile(tid, state, workspace)
             while state['steps'] < state['budgets']['steps']:
@@ -271,12 +292,24 @@ class TaskManager:
                 state['steps'] += 1
                 self.save(tid, 'running', state, {'type': 'progress', 'text': 'Requesting next action', 'step': state['steps']})
                 try:
-                    raw = call_model(context)
-                    state['output'] += len(raw.encode('utf-8')) if isinstance(raw, str) else 0
+                    remaining_output = state['budgets']['output'] - state['output']
+                    raw = self._call_model(call_model, context, remaining_output)
+                    if not isinstance(raw, str):
+                        raise ValueError('Provider response must be text.')
+                    raw_size = len(raw.encode('utf-8'))
+                    if raw_size > remaining_output:
+                        state['output'] = state['budgets']['output']
+                        finish('budget_exhausted', 'Provider response exceeded the remaining output budget; action discarded.')
+                        return
+                    state['output'] += raw_size
                     if over_budget():
                         finish('budget_exhausted', 'Elapsed/output budget exhausted before action.'); return
                     a = parse_action(raw)
                     state['retry_streak'] = 0
+                except OutputBudgetExceeded:
+                    state['output'] = state['budgets']['output']
+                    finish('budget_exhausted', 'Provider response exceeded the remaining output budget; action discarded.')
+                    return
                 except (requests.RequestException,) as exc:
                     response = getattr(exc, 'response', None)
                     code = response.status_code if response is not None else None
@@ -321,11 +354,28 @@ class TaskManager:
                     if source.is_file() and source.stat().st_size <= 32000:
                         state['pending_digest'] = hashlib.sha256(source.read_bytes()).hexdigest()
                 self.save(tid, 'running', state, {'type': 'action', 'text': 'Executing ' + kind})
+                remaining_output = state['budgets']['output'] - state['output']
                 try:
-                    output = workspace.execute(a)
-                    failed = kind == 'compare_files' and output.startswith('MISMATCH:')
+                    if kind == 'read_file':
+                        path = workspace.path(a['path'])
+                        if path.is_file() and path.stat().st_size > remaining_output:
+                            output = 'Read skipped: file exceeds remaining output budget.'
+                            failed = True
+                        else:
+                            output = workspace.execute(a)
+                            failed = False
+                    else:
+                        output = workspace.execute(a)
+                        failed = kind == 'compare_files' and output.startswith('MISMATCH:')
                 except (ToolError, OSError, UnicodeError):
                     output = 'Tool failed. Check required arguments and workspace constraints.'
+                    failed = True
+                output_size = len(output.encode('utf-8'))
+                if output_size > remaining_output:
+                    output = 'Tool output exceeded remaining output budget; discarded.'
+                    output_size = len(output.encode('utf-8'))
+                    if output_size > remaining_output:
+                        output, output_size = '', 0
                     failed = True
                 if failed:
                     state['failure_count'] = state['failure_count'] + 1 if signature == state['failure_signature'] else 1
@@ -333,7 +383,7 @@ class TaskManager:
                 else:
                     state['failure_signature'], state['failure_count'] = None, 0
                 state['pending'] = None
-                state['output'] += len(output.encode('utf-8'))
+                state['output'] += output_size
                 state['written'] = sorted(workspace.written)
                 state['checked'] = sorted(workspace.checked)
                 state['messages'].append({'role': 'user', 'content': 'UNTRUSTED TOOL RESULT: ' + output})
@@ -369,13 +419,25 @@ class TaskManager:
         if self.closed:
             return
         with self.lock:
+            self.closing = True
             for stop in self.stops.values():
                 stop.set()
-        for t in list(self.threads.values()):
+            threads = list(self.threads.values())
+        for t in threads:
             t.join(50)
-        if any(t.is_alive() for t in self.threads.values()):
-            raise RuntimeError('Worker still running; cannot close database safely.')
         with self.lock:
+            if any(t.is_alive() for t in self.threads.values()):
+                raise RuntimeError('Worker still running; cannot close database safely.')
             self.db.close()
             self.process_lock.close()
             self.closed = True
+
+    @staticmethod
+    def _call_model(call_model, messages, output_limit):
+        """Pass remaining output budget to providers that support it; keep 1-arg callers compatible."""
+        try:
+            signature = inspect.signature(call_model)
+            signature.bind(messages, output_limit)
+        except (TypeError, ValueError):
+            return call_model(messages)
+        return call_model(messages, output_limit)

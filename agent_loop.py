@@ -54,6 +54,18 @@ class ToolError(ValueError):
     pass
 
 
+def is_upload_path(name):
+    """Recognize the reserved upload namespace despite Windows name aliases."""
+    try:
+        parts = pathlib.Path(name).parts
+    except (TypeError, ValueError):
+        return False
+    parts = [str(part).rstrip(' .') for part in parts]
+    while parts and not parts[0]:
+        parts.pop(0)
+    return bool(parts) and parts[0].casefold() == 'uploads'
+
+
 def calculate(expression):
     if not isinstance(expression, str) or len(expression) > 200:
         raise ToolError('Expression must be at most 200 characters.')
@@ -106,7 +118,7 @@ class Workspace:
         if kind == 'calculate':
             return str(calculate(action.get('expression')))
         if kind == 'list_files':
-            files = sorted(str(p.relative_to(self.root)) for p in self.root.rglob('*')
+            files = sorted(p.relative_to(self.root).as_posix() for p in self.root.rglob('*')
                            if p.is_file() and not p.is_symlink())
             return json.dumps(files[:100])
         if kind == 'read_file':
@@ -114,7 +126,7 @@ class Workspace:
             if not path.is_file() or path.stat().st_size > 32000:
                 raise ToolError('File missing or exceeds 32 KB.')
             content = path.read_text(encoding='utf-8')
-            self.checked.add(str(path.relative_to(self.root)))
+            self.checked.add(path.relative_to(self.root).as_posix())
             return content
         if kind == 'compare_files':
             source = self.path(action.get('source_path'))
@@ -136,9 +148,11 @@ class Workspace:
         raise ToolError('Unsupported action. No shell or network tools are available.')
 
     def _write_bytes(self, name, content, allow_upload=False):
-        if pathlib.Path(str(name)).parts[:1] == ('uploads',) and not allow_upload:
+        if is_upload_path(name) and not allow_upload:
             raise ToolError('Uploaded documents are read-only. Write a separate output file.')
         path = self.path(name)
+        if is_upload_path(path.relative_to(self.root)) and not allow_upload:
+            raise ToolError('Uploaded documents are read-only. Write a separate output file.')
         if len(content) > 32000:
             raise ToolError('Text files are limited to 32 KB.')
         current = list(self.root.rglob('*'))
@@ -151,7 +165,7 @@ class Workspace:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
         path.chmod(0o600)
-        name = str(path.relative_to(self.root))
+        name = path.relative_to(self.root).as_posix()
         self.written.add(name)
         self.checked.discard(name)
         return 'Wrote ' + name + '. Read it back before finishing.'
@@ -200,9 +214,10 @@ def run_loop(goal, history, workspace, call_model, stopped, max_steps=12):
                                re.sub(r'^\d+-', '', p.name.removesuffix('.txt')))]
                 if len(uploads) != 1:
                     raise ToolError('Name one existing source workspace path.')
-                source = workspace.path(str(uploads[0].relative_to(workspace.root)))
+                source = workspace.path(uploads[0].relative_to(workspace.root).as_posix())
             target = workspace.path(target_name)
-            if source == target or target.relative_to(workspace.root).parts[:1] == ('uploads',):
+            if (source == target or is_upload_path(target_name)
+                    or is_upload_path(target.relative_to(workspace.root))):
                 raise ToolError('Name a separate, writable target path outside uploads/.')
             exact_source, exact_target = source, target
         except (ToolError, OSError) as exc:
@@ -237,9 +252,9 @@ def run_loop(goal, history, workspace, call_model, stopped, max_steps=12):
                 messages.append({'role': 'user', 'content': 'Read and check these written files first: ' + ', '.join(sorted(workspace.written - workspace.checked))})
                 yield {'type': 'check', 'text': 'Checking written files before completion.', 'step': step}
                 continue
-            if kind == 'done' and exact_source:
-                source_name = str(exact_source.relative_to(workspace.root))
-                target_name = str(exact_target.relative_to(workspace.root))
+            if kind == 'done' and exact_source and exact_target:
+                source_name = exact_source.relative_to(workspace.root).as_posix()
+                target_name = exact_target.relative_to(workspace.root).as_posix()
                 try:
                     # Revalidate paths and bounds on every completion candidate.
                     result = workspace.execute({'action': 'compare_files',

@@ -1,5 +1,6 @@
 """Durable harness regressions; dummy providers, real SQLite and threads."""
 import json
+import os
 import pathlib
 import tempfile
 import time
@@ -30,6 +31,12 @@ class HarnessTests(unittest.TestCase):
                 return row
             time.sleep(.01)
         self.fail('worker did not settle')
+
+    def wait_worker_gone(self, m, tid):
+        end = time.monotonic() + 5
+        while tid in m.threads and time.monotonic() < end:
+            time.sleep(.01)
+        self.assertNotIn(tid, m.threads)
 
     def test_stop_resume_restores_counters_and_prevents_duplicate_writes(self):
         import threading
@@ -95,6 +102,76 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             m.submit('bob', 'anything', [], lambda _: '', checks=[{'type': 'semantic', 'text': 'beautiful'}])
 
+    def test_exact_copy_check_cannot_target_uploads_case_variant(self):
+        m = self.manager()
+        from agent_loop import Workspace
+        workspace = Workspace(m.workspaces / 'alice')
+        for path in ('Uploads/output.txt', 'uploads./output.txt', 'uploads /output.txt', '. /uploads/output.txt'):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                m.validate_checks([{'type': 'exact_copy', 'source_path': 'source.txt', 'path': path}], workspace)
+
+    def test_worker_passes_remaining_output_budget_to_provider(self):
+        m = self.manager(); limits = []
+        def provider(messages, output_limit):
+            limits.append(output_limit)
+            return action('need_input', text='wait')
+        tid = m.submit('alice', 'pause', [], provider, budgets={'output': 1000})
+        self.assertEqual(self.wait(m, tid)['status'], 'needs_input')
+        self.assertEqual(limits, [1000])
+
+    def test_file_tool_output_does_not_overrun_output_budget(self):
+        m = self.manager()
+        workspace = self.root/'workspaces/alice'; workspace.mkdir(parents=True)
+        (workspace/'large.txt').write_text('x' * 5000)
+        tid = m.submit('alice', 'read the file', [], lambda _: action('read_file', path='large.txt'),
+                       budgets={'output': 200})
+        row = self.wait(m, tid)
+        self.assertLessEqual(row['state']['output'], row['state']['budgets']['output'])
+        self.assertNotIn('x' * 100, json.dumps(row['state']['messages']))
+
+    def test_worker_bookkeeping_is_released_after_task_finishes(self):
+        m = self.manager()
+        tid = m.submit('alice', 'pause', [], lambda _: action('need_input', text='wait'))
+        self.assertEqual(self.wait(m, tid)['status'], 'needs_input')
+        self.wait_worker_gone(m, tid)
+        self.assertNotIn(tid, m.stops)
+
+    def test_resume_normalizes_persisted_evidence_paths(self):
+        m = self.manager()
+        workspace = self.root/'workspaces/alice'
+        (workspace/'nested').mkdir(parents=True)
+        (workspace/'nested/output.txt').write_text('verified')
+        tid = m.submit('alice', 'verify output', [], lambda _: action('need_input', text='checks needed'))
+        row = self.wait(m, tid); self.wait_worker_gone(m, tid)
+        self.assertIsNotNone(row)
+        state = row['state']
+        state['written'] = ['nested\\output.txt' if os.name == 'nt' else 'nested/output.txt']
+        state['checked'] = []
+        m.save(tid, 'needs_input', state, {'type': 'status', 'text': 'legacy path shape'})
+        replies = iter([action('read_file', path='nested/output.txt'), action('done', text='Verified')])
+        checks = [{'type': 'file_text', 'path': 'nested/output.txt', 'text': 'verified'}]
+        self.assertTrue(m.resume(tid, 'alice', lambda _: next(replies), answer='Run checks', checks=checks))
+        result = self.wait(m, tid)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['state']['written'], ['nested/output.txt'])
+
+    def test_invalid_persisted_evidence_path_blocks_and_releases_owner(self):
+        m = self.manager()
+        tid = m.submit('alice', 'verify output', [], lambda _: action('need_input', text='checks needed'))
+        row = self.wait(m, tid); self.wait_worker_gone(m, tid)
+        state = row['state']
+        state['written'] = ['../outside.txt']
+        m.save(tid, 'needs_input', state, {'type': 'status', 'text': 'invalid persisted path'})
+        self.assertTrue(m.resume(tid, 'alice', lambda _: action('done', text='Done'), answer='Continue'))
+        result = self.wait(m, tid)
+        self.assertIsNotNone(result)
+        self.wait_worker_gone(m, tid)
+        self.assertEqual(result['status'], 'blocked')
+        self.assertFalse(m.busy('alice'))
+        self.assertFalse(m.stop(tid, 'alice'))
+        self.assertNotIn(tid, m.stops)
+
     def test_owner_concurrency_is_reserved_atomically(self):
         import threading
         m = self.manager(); release = threading.Event()
@@ -138,7 +215,9 @@ class HarnessTests(unittest.TestCase):
         self.assertTrue(any(e['type'] == 'compaction' for e in m.events(tid, 'alice')))
         self.assertGreater(len(json.dumps(row['state']['messages'])), 6000)
         tid = m.submit('bob', 'Wait', [], lambda _: 'x'*10000, budgets={'output': 1000})
-        self.assertEqual(self.wait(m, tid, 'bob')['status'], 'budget_exhausted')
+        row = self.wait(m, tid, 'bob')
+        self.assertEqual(row['status'], 'budget_exhausted')
+        self.assertLessEqual(row['state']['output'], row['state']['budgets']['output'])
         tid = m.submit('carol', 'Wait', [], lambda _: (time.sleep(.05), action('write_file', path='x', content='no'))[1], budgets={'elapsed': .02})
         self.assertEqual(self.wait(m, tid, 'carol')['status'], 'budget_exhausted')
         self.assertFalse((self.root/'workspaces/carol/x').exists())
@@ -192,7 +271,7 @@ class HarnessTests(unittest.TestCase):
         import concurrent.futures
         m = self.manager()
         tid = m.submit('alice', 'Wait', [], lambda _: action('need_input', text='wait'), budgets={'steps':2})
-        self.wait(m, tid); m.threads[tid].join(2)
+        self.wait(m, tid); self.wait_worker_gone(m, tid)
         import threading
         gate=threading.Event()
         def provider(_): gate.wait(2); return action('plan', text='wait')
@@ -236,7 +315,7 @@ class HarnessTests(unittest.TestCase):
         m=self.manager(); p=self.root/'workspaces/alice'; p.mkdir(parents=True)
         (p/'source').write_bytes(b'original')
         tid=m.submit('alice','Copy source exactly to out',[],lambda _: action('need_input',text='wait'))
-        row=self.wait(m,tid); m.threads[tid].join(2)
+        row=self.wait(m,tid); self.wait_worker_gone(m,tid)
         s=row['state']; s['pending']={'action':'copy_file','source_path':'source','path':'out'}
         s['pending_digest']=hashlib.sha256(b'original').hexdigest()
         (p/'source').write_bytes(b'changed'); (p/'out').write_bytes(b'changed')

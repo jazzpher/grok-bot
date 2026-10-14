@@ -15,10 +15,12 @@ from flask import Flask, Response, request, render_template_string, session, red
 from agent_loop import ACTION_SCHEMA, Workspace, run_loop
 from documents import extract_text, MAX_UPLOAD
 from werkzeug.utils import secure_filename
-from task_harness import TaskManager
+from task_harness import OutputBudgetExceeded, TaskManager
 
 API_URL = os.environ.get('GROK_API_URL', 'https://api.x.ai/v1/chat/completions')
 DEFAULT_MODEL = os.environ.get('GROK_MODEL', 'grok-4-fast')
+MAX_CHAT_OUTPUT_BYTES = 128000
+MAX_CHAT_RESPONSE_BYTES = MAX_CHAT_OUTPUT_BYTES * 6 + 65536
 SYSTEM_PROMPT = 'You are a helpful assistant. Do not claim to be a particular provider or model unless verified. Be honest about available tools.'
 ALLOWED_API_URLS = {
     'https://api.x.ai/v1/chat/completions',
@@ -428,7 +430,7 @@ def client():
             uploads = {}
             for p in workspace.root.glob('uploads/*'):
                 if p.is_file() and not p.is_symlink() and p.stat().st_size <= 32000:
-                    try: uploads[str(p.relative_to(workspace.root))] = p.read_text(encoding='utf-8')
+                    try: uploads[p.relative_to(workspace.root).as_posix()] = p.read_text(encoding='utf-8')
                     except (OSError, UnicodeError): pass
             clients[sid] = {'history': task_manager().load_history(sid), 'busy': threading.Lock(), 'stop': threading.Event(),
                             'workspace': workspace, 'uploads': uploads}
@@ -442,7 +444,7 @@ def config_snapshot():
                 settings.get('model_override') or app.config['MODEL'])
 
 
-def model_reply(messages, cfg, stream=False, structured=False):
+def model_reply(messages, cfg, stream=False, structured=False, response_limit=None):
     key, url, model = cfg
     if url not in ALLOWED_API_URLS:
         raise ValueError('Unsupported provider URL.')
@@ -451,13 +453,47 @@ def model_reply(messages, cfg, stream=False, structured=False):
         payload['response_format'] = {'type': 'json_schema', 'json_schema': {'name': 'task_action', 'strict': True, 'schema': ACTION_SCHEMA}}
     res = requests.post(url, headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'},
                         json=payload,
-                        stream=stream, timeout=(10, 45))
+                        stream=stream or response_limit is not None, timeout=(10, 45))
     try:
         res.raise_for_status()
     except requests.RequestException:
         res.close()
         raise
     return res
+
+
+class ChatResponseTooLarge(Exception):
+    pass
+
+
+def iter_bounded_sse_lines(response):
+    """Yield SSE lines while bounding the full streamed response body."""
+    received = 0
+    pending = bytearray()
+    for chunk in response.iter_content(chunk_size=8192):
+        if not chunk:
+            continue
+        received += len(chunk)
+        if received > MAX_CHAT_RESPONSE_BYTES:
+            raise ChatResponseTooLarge
+        pending.extend(chunk)
+        while True:
+            lf = pending.find(b'\n')
+            cr = pending.find(bytes((13,)))
+            separators = [pos for pos in (lf, cr) if pos >= 0]
+            if not separators:
+                break
+            pos = min(separators)
+            if pending[pos] == 13 and pos + 1 == len(pending):
+                break
+            end = pos + 1
+            if pending[pos] == 13 and pending[end:end + 1] == b'\n':
+                end += 1
+            line = bytes(pending[:pos])
+            del pending[:end]
+            yield line
+    if pending:
+        yield bytes(pending).rstrip(bytes((13,)))
 
 
 @app.route('/')
@@ -485,27 +521,75 @@ def chat():
     cfg = config_snapshot()
     def generate():
         chunks = []
+        output_bytes = 0
+        complete = False
+        stopped = False
+        provider_error = False
+        length_truncated = False
         try:
             messages = [{'role': 'system', 'content': SYSTEM_PROMPT}, *c['history'][-24:], *upload_context(c), {'role': 'user', 'content': text}]
             if app.config['MOCK'] and not cfg[0]:
                 answer = '(mock) got your message: ' + text
-                chunks.append(answer); yield answer
+                chunks.append(answer); complete = True; yield answer
             else:
                 with model_reply(messages, cfg, stream=True) as res:
-                    for raw in res.iter_lines():
-                        if c['stop'].is_set(): break
-                        line = raw.decode('utf-8')
-                        if not line.startswith('data: '): continue
-                        if line[6:].strip() == '[DONE]': break
-                        try: piece = json.loads(line[6:])['choices'][0].get('delta', {}).get('content', '')
-                        except (ValueError, KeyError, IndexError): continue
-                        if piece: chunks.append(piece); yield piece
+                    for raw in iter_bounded_sse_lines(res):
+                        if c['stop'].is_set():
+                            stopped = True
+                            break
+                        try:
+                            line = raw.decode('utf-8')
+                        except UnicodeDecodeError:
+                            continue
+                        if not line.startswith('data:'): continue
+                        payload = line[5:].lstrip()
+                        if payload.strip() == '[DONE]':
+                            complete = True
+                            break
+                        try:
+                            event = json.loads(payload)
+                            if isinstance(event, dict) and event.get('error') is not None:
+                                provider_error = True
+                                break
+                            choices = event.get('choices') if isinstance(event, dict) else None
+                            if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                                continue
+                            choice = choices[0]
+                            if choice.get('finish_reason') == 'length':
+                                length_truncated = True
+                                break
+                            delta = choice.get('delta')
+                            if not isinstance(delta, dict):
+                                continue
+                            piece = delta.get('content', '')
+                        except (TypeError, ValueError, IndexError):
+                            continue
+                        if not isinstance(piece, str) or not piece:
+                            continue
+                        piece_bytes = len(piece.encode('utf-8'))
+                        if output_bytes + piece_bytes > MAX_CHAT_OUTPUT_BYTES:
+                            yield '[Chat reply exceeded the 128 KB limit; partial reply was not saved.]'
+                            return
+                        output_bytes += piece_bytes
+                        chunks.append(piece)
+                        yield piece
+            if not complete:
+                if not stopped:
+                    if provider_error:
+                        yield '[Provider returned an error; partial reply was not saved.]'
+                    elif length_truncated:
+                        yield '[Provider truncated the reply at its output limit; partial reply was not saved.]'
+                    else:
+                        yield '[Provider stream interrupted; partial reply was not saved.]'
+                return
             c['history'].extend([{'role': 'user', 'content': text}, {'role': 'assistant', 'content': ''.join(chunks)}])
             c['history'] = c['history'][-24:]
             task_manager().store_history(sid, c['history'])
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else 'unknown'
             yield f'[Provider HTTP {status}. Check key permissions, model availability and quota.]'
+        except ChatResponseTooLarge:
+            yield '[Provider stream exceeded the response limit; partial reply was not saved.]'
         except (requests.RequestException, ValueError, KeyError, IndexError):
             yield '[Provider error or interrupted reply. Check key, model and quota.]'
         finally:
@@ -541,10 +625,38 @@ def task():
 
 def task_provider():
     cfg = config_snapshot()
-    def call(messages):
-        with model_reply(messages, cfg, structured=True) as res:
-            return res.json()['choices'][0]['message']['content']
+    def call(messages, max_output_bytes):
+        response_limit = max_output_bytes * 6 + 65536
+        with model_reply(messages, cfg, structured=True, response_limit=response_limit) as res:
+            response = read_limited_json_response(res, response_limit)
+        content = response['choices'][0]['message']['content']
+        if not isinstance(content, str):
+            raise ValueError('Provider response content must be text.')
+        if len(content.encode('utf-8')) > max_output_bytes:
+            raise OutputBudgetExceeded('Provider response exceeded output budget.')
+        return content
     return call
+
+
+def read_limited_json_response(res, byte_limit):
+    """Read a provider JSON body with a strict decompressed-byte cap."""
+    try:
+        declared = int(res.headers.get('Content-Length', ''))
+    except (AttributeError, TypeError, ValueError):
+        declared = None
+    if declared is not None and declared > byte_limit:
+        raise OutputBudgetExceeded('Provider response body exceeds the configured limit.')
+    body = bytearray()
+    for chunk in res.iter_content(chunk_size=8192):
+        if not chunk:
+            continue
+        if len(body) + len(chunk) > byte_limit:
+            raise OutputBudgetExceeded('Provider response body exceeds the configured limit.')
+        body.extend(chunk)
+    try:
+        return json.loads(body)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('Provider returned invalid JSON.') from exc
 
 
 @app.route('/tasks')

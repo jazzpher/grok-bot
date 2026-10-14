@@ -50,16 +50,20 @@ task trajectories persist in SQLite. Set a stable GROK_SESSION_SECRET to keep
 session access across restarts. Remove unused workspace folders manually when
 the app is stopped. This demo is not a multi-user service.
 
-Stop prevents the next action but may wait up to the current provider
-request timeout before returning; it is cooperative, not a hard thread kill.
+Stop is cooperative: it prevents the next action after the current provider
+call yields control; it does not hard-kill a thread. Chat-stream Stop is checked
+between parsed SSE lines, so a stalled or unterminated line can delay cancellation
+beyond one 45-second read-timeout interval; a slow-drip response has no hard
+end-to-end deadline.
 Tasks survive HTTP disconnects. Restart interrupts active tasks until explicit
 Resume; counters/checkpoints are restored without blindly replaying writes.
 Saved task selection restores paused questions and completed results on reload
 and selector changes. Model final answers appear as `result` only after explicit
 artifact checks pass, separately from the verifier message. If checks were empty,
 fill the checks JSON field before Resume; existing checks remain immutable.
-The single-process database guard supports Unix and Windows locking; native
-Windows runtime is not yet verified. Use Windows ACLs to protect the data folder.
+The single-process database guard supports Unix and Windows locking. The test
+suite runs on native Windows, but that does not certify production deployment.
+Use Windows ACLs to protect the data folder.
 
 ## Private access and keys
 

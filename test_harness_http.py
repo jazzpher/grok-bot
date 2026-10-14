@@ -50,6 +50,12 @@ class HTTPHarnessTests(unittest.TestCase):
             time.sleep(.01)
         self.fail('HTTP task stuck')
 
+    def wait_worker_gone(self, tid):
+        deadline = time.monotonic() + 5
+        while tid in self.manager.threads and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertNotIn(tid, self.manager.threads)
+
     def test_disconnect_worker_completes_and_restart_restores_session(self):
         entered, release = threading.Event(), threading.Event()
         replies = iter([{'action':'copy_file','source_path':'uploads/input.txt.txt','path':'out.txt'},
@@ -57,9 +63,9 @@ class HTTPHarnessTests(unittest.TestCase):
         class Reply:
             def __enter__(self): return self
             def __exit__(self, *a): pass
-            def json(self):
+            def iter_content(self, chunk_size):
                 entered.set(); release.wait(3)
-                return {'choices':[{'message':{'content':json.dumps(next(replies))}}]}
+                yield json.dumps({'choices':[{'message':{'content':json.dumps(next(replies))}}]}).encode()
         with patch.object(webui, 'model_reply', lambda *a, **k: Reply()):
             upload = self.a.post(self.url+'/upload', files={'file':('input.txt', b'a\r\nb\rc\n')})
             self.assertEqual(upload.status_code, 200)
