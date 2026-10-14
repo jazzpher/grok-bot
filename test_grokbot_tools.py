@@ -3,6 +3,9 @@ import json
 import tempfile
 import threading
 import unittest
+from unittest import mock
+import time
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
@@ -122,16 +125,32 @@ class RegistryTests(unittest.TestCase):
         self.assertFalse(res.ok)
 
     def test_run_command_runs_in_workspace_and_reports_exit_code(self):
-        res = self.run_tool('run_command', command='printf hello && pwd')
-        self.assertTrue(res.ok, res.output)
-        self.assertIn('hello', res.output)
-        self.assertIn(str(self.ws.root.resolve()), res.output)
-        res = self.run_tool('run_command', command='exit 3')
-        self.assertIn('exit code 3', res.output)
+        with mock.patch.object(gconfig, 'SANDBOX_BACKEND', 'subprocess'):   # host cwd semantics
+            res = self.run_tool('run_command', command='printf hello && pwd')
+            self.assertTrue(res.ok, res.output)
+            self.assertIn('hello', res.output)
+            self.assertIn(str(self.ws.root.resolve()), res.output)
+            res = self.run_tool('run_command', command='exit 3')
+            self.assertIn('exit code 3', res.output)
 
     def test_run_command_timeout_is_bounded(self):
-        res = self.run_tool('run_command', command='sleep 5', timeout=1)
-        self.assertIn('timed out', res.output.lower())
+        with mock.patch.object(gconfig, 'SANDBOX_BACKEND', 'subprocess'):
+            res = self.run_tool('run_command', command='sleep 5', timeout=1)
+            self.assertIn('timed out', res.output.lower())
+
+    @unittest.skipUnless(shutil.which('docker'), 'docker CLI not available')
+    def test_docker_backend_mounts_workspace_and_enforces_timeout(self):
+        with mock.patch.object(gconfig, 'SANDBOX_BACKEND', 'docker'):
+            res = self.run_tool('run_command', command='printf hello && pwd')
+            if 'could not start the sandbox container' in res.output:
+                self.skipTest('docker daemon/image unavailable: ' + res.output[:200])
+            self.assertIn('hello', res.output)
+            self.assertIn('/workspace', res.output)
+            self.assertIn('docker:', res.output)
+            started = time.monotonic()
+            res = self.run_tool('run_command', command='sleep 20', timeout=2)
+            self.assertIn('timed out', res.output.lower())
+            self.assertLess(time.monotonic() - started, 15, 'in-container timeout must fire before the host grace period')
 
     def test_tool_output_is_bounded(self):
         text, truncated = bound_output('x' * (gconfig.MAX_TOOL_OUTPUT_CHARS + 500))

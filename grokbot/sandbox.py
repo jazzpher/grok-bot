@@ -222,7 +222,11 @@ class DockerBackend:
                 '-e', 'HOME=/workspace', '-e', 'TERM=dumb', '-e', 'NO_COLOR=1', '-e', 'CI=1', '-e', 'PYTHONDONTWRITEBYTECODE=1']
         if os.name == 'posix':
             args += ['--user', '%d:%d' % (os.getuid(), os.getgid())]
-        args += [self.image, 'sh', '-c', command]
+        # The command's own budget is enforced inside the container with coreutils/busybox `timeout` (SIGKILL,
+        # exit 137); the host-side limit below only adds start-up grace (image pull, daemon latency).
+        wrapper = ('if command -v timeout >/dev/null 2>&1; then exec timeout -s KILL "$0" sh -c "$1"; '
+                   'else exec sh -c "$1"; fi')
+        args += [self.image, 'sh', '-c', wrapper, str(int(timeout)), command]
         started = time.monotonic()
         timed_out = False
         try:
@@ -233,6 +237,8 @@ class DockerBackend:
             subprocess.run(['docker', 'kill', name], capture_output=True, timeout=15)
             out, err, code = exc.stdout or b'', exc.stderr or b'', None
         duration = time.monotonic() - started
+        if code in (124, 137) and duration >= timeout - 0.5 and not timed_out:
+            timed_out = True   # killed by the in-container `timeout`
         stdout, t1 = _bound(out)
         stderr, t2 = _bound(err, limit=config.COMMAND_MAX_OUTPUT // 4)
         if code == 125 and b'docker' in (err or b'').lower():
