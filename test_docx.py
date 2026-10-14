@@ -86,12 +86,11 @@ class HarnessTests(unittest.TestCase):
     def events(self, tid):
         return [json.loads(r[0]) for r in self.m.db.execute('SELECT payload FROM events WHERE task=? ORDER BY seq', (tid,))]
 
-    def test_invalid_replies_count_attempts_and_docx_needs_content_review(self):
+    def test_invalid_replies_do_not_burn_steps_and_docx_completes(self):
         replies = ['nope', '[]', '{"action":"write_docx"}', 'Sure! here is a letter', '{"x":1}',
                    act('write_docx', path='letter.docx', content=LETTER), act('done', text='Saved letter.docx')]
-        tid, row = self.run_script(replies, budgets={'steps': 8})
-        self.assertEqual(row['status'], 'needs_input', row)
-        self.assertEqual(row['state']['attempts'], 7)
+        tid, row = self.run_script(replies, budgets={'steps': 3})
+        self.assertEqual(row['status'], 'completed', row)
         self.assertEqual(row['state']['steps'], 2)
         self.assertEqual(row['state']['invalid'], 5)
         self.assertTrue((self.root / 'w/alice/letter.docx').is_file())
@@ -147,7 +146,7 @@ class LoopTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         ws = Workspace(pathlib.Path(tmp.name) / 'ws')
         it = iter(['bad', 'bad', act('write_docx', path='a.docx', content='Hello'), act('done', text='ok')])
-        events = list(run_loop('g', [], ws, lambda _m: next(it), lambda: False, 4))
+        events = list(run_loop('g', [], ws, lambda _m: next(it), lambda: False, 2))
         self.assertEqual(events[-1]['type'], 'done')
         self.assertTrue((ws.root / 'a.docx').is_file())
 
