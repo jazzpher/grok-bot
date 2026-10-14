@@ -50,16 +50,20 @@ task trajectories persist in SQLite. Set a stable GROK_SESSION_SECRET to keep
 session access across restarts. Remove unused workspace folders manually when
 the app is stopped. This demo is not a multi-user service.
 
-Stop prevents the next action but may wait up to the current provider
-request timeout before returning; it is cooperative, not a hard thread kill.
+Stop is cooperative: it prevents the next action after the current provider
+call yields control; it does not hard-kill a thread. Chat-stream Stop is checked
+between parsed SSE lines, so a stalled or unterminated line can delay cancellation
+beyond one 45-second read-timeout interval; a slow-drip response has no hard
+end-to-end deadline.
 Tasks survive HTTP disconnects. Restart interrupts active tasks until explicit
 Resume; counters/checkpoints are restored without blindly replaying writes.
 Saved task selection restores paused questions and completed results on reload
 and selector changes. Model final answers appear as `result` only after explicit
 artifact checks pass, separately from the verifier message. If checks were empty,
 fill the checks JSON field before Resume; existing checks remain immutable.
-The single-process database guard supports Unix and Windows locking; native
-Windows runtime is not yet verified. Use Windows ACLs to protect the data folder.
+The single-process database guard supports Unix and Windows locking. The test
+suite runs on native Windows, but that does not certify production deployment.
+Use Windows ACLs to protect the data folder.
 
 ## Private access and keys
 
@@ -148,3 +152,96 @@ Structured replies require every argument field (empty strings for unused fields
 Action-specific server validation rejects missing, blank or wrong-type arguments
 before a tool executes, and supplies the exact correction within the step budget.
 Empty write_file content remains valid. Live provider behavior still needs testing.
+
+## Learned skills (procedural memory)
+
+Click **Skills** to see the saved workflows and read/edit their full Markdown.
+Skills are text instructions, not new model weights, executable plugins or new
+permissions. Inspired by Hermes' documented skills system:
+https://hermes-agent.nousresearch.com/docs/user-guide/features/skills
+
+- In **Task loop**, the agent gets a small skill index, then uses `list_skills`
+  and `read_skill` to load a relevant workflow on demand.
+- After a nontrivial task or a useful correction, it can use `save_skill` before
+  finishing. It must first pass the task's explicit artifact checks and read
+  back written files. Unverified/failed tasks cannot automatically teach skills.
+  Selection is model-driven, not a guarantee that every task creates a skill.
+- A save appears in the task's visible tool events. The full file stays available
+  in the Skills panel. No background model review or extra provider request
+  was added; skill actions use the normal bounded loop and consume its steps.
+- You can manually create a workflow using **New skill**, a lowercase name,
+  **When to use it**, Markdown instructions and **Save skill**. Select a skill
+  to edit it; edits use revision checks so stale tabs cannot silently overwrite.
+  Delete requires confirmation. Refresh lists recently learned skills.
+- Chat mode sees only the index and has no skill tools. Use Task loop to load,
+  learn and reuse automatically, or the Skills panel to create/edit directly.
+
+Storage: `workspaces/.skills/<browser-session-id>/<skill-name>/SKILL.md` (under
+`GROK_WORKSPACE_DIR` when configured). New chat and server restarts preserve
+skills for the same browser session. A different browser or cleared cookies
+has a separate library. Existing server session-cookie lifetime still applies.
+Skills are outside the task workspace, so ordinary file tools cannot overwrite
+or download them. They are never committed to the public repository. Back up
+this folder together with server data if you need durable storage elsewhere.
+
+Example of the actual saved format (not seeded into your library):
+
+```markdown
+---
+name: exact-copy
+description: "Copy a text artifact without changing any characters"
+---
+## When to use
+A task needs an exact text copy.
+## Steps
+1. Use copy_file with separate source and target paths.
+2. Read the target back.
+## Pitfalls
+Do not regenerate the source using the model: characters may change.
+## Verification
+Use compare_files. Only MATCH means the bytes are identical.
+```
+
+Limits: 30 skills per session, 12 KB each, no supporting scripts. Writes are
+atomic; path traversal/symlinks are rejected; common key/private-key patterns
+are blocked. That scan is not a complete secret detector. Do not save passwords,
+keys, uploaded documents, personal examples or raw chat logs. Skill contents
+are untrusted advice and cannot grant authority or bypass tool constraints.
+No changes were made to reasoning visibility or the existing task log policy.
+
+Test without paid calls: `python -m unittest discover -v`, `node test_ui.cjs`,
+`node test_stop_ui.cjs`. `test_skills.py` covers persistence, isolation, edits,
+limits, symlinks, failed writes, HTTP CRUD/CSRF, verified learning/reuse and
+interrupted save recovery. Tests use scripted fake provider responses, not a
+live Gemini call.
+
+### Deterministic curator (no model calls)
+
+Inspired by https://hermes-agent.nousresearch.com/docs/user-guide/features/curator .
+The curator runs locally when the skill library is listed or used, not through
+an always-on worker. `read_skill` in Task loop records a use. Merely looking at
+Skills, listing the index or reading the editor does not count as use.
+
+- Active: used/created/restored less than 14 days ago.
+- Stale: 14 days without use. Still available to the agent.
+- Archived: 30 days without use. Hidden from the agent's index; `read_skill`
+  refuses it until restored. The Markdown file stays on disk, not deleted.
+- Click Skills, select an `[archived]` workflow, then **Restore selected skill**.
+  This resets the unused-day clock without rewriting its instructions.
+- A small `metadata.json` beside SKILL.md stores creation time, last use, use
+  count and archive state. The panel shows active/stale/archived status.
+- Editing an archived skill does not automatically reactivate it. Restore it
+  explicitly. Archived skills still count toward the 30-skill storage limit.
+
+No model-based consolidation, rewrites or deletion is included. If the server
+was off at the 30-day mark, archiving is applied on the next library access.
+
+### Combined hardening verification
+
+This branch combines learned skills/curator (#6) with workspace/provider
+hardening (#7). Filtered, truncated or other unsupported terminal finish reasons
+are shown as incomplete and are not saved in chat history or run as task actions.
+Task bodies without a finish_reason remain compatible; chat still requires DONE.
+Tests cover both original suites plus the skill/output-budget/upload boundary.
+Native Windows and physical iPhone/Safari were not run by the combined-branch
+author. Earlier Windows test claims refer to #7's author report, not this build.

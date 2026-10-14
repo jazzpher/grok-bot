@@ -12,6 +12,7 @@ class StopHTTPTests(unittest.TestCase):
         self.b.get(self.url + '/history')
     shutdown = test_harness_http.HTTPHarnessTests.shutdown
     owner = test_harness_http.HTTPHarnessTests.owner
+    wait_worker_gone = test_harness_http.HTTPHarnessTests.wait_worker_gone
 
     def test_idle_stop_is_not_reported_as_requested(self):
         result = self.a.post(self.url + '/stop')
@@ -42,7 +43,7 @@ class StopHTTPTests(unittest.TestCase):
         self.assertTrue(webui.clients[owner_a]['stop'].is_set())
         self.assertFalse(webui.clients[owner_b]['stop'].is_set())
         release.set()
-        for tid in (a, b): self.manager.threads[tid].join(2)
+        for tid in (a, b): self.wait_worker_gone(tid)
         self.assertEqual(self.manager.get(a, owner_a)['status'], 'stopped')
         self.assertEqual(self.manager.get(b, owner_b)['status'], 'needs_input')
         self.assertEqual(self.a.post(self.url + '/stop').json(), {'requested': False})
@@ -52,9 +53,10 @@ class StopHTTPTests(unittest.TestCase):
         class Reply:
             def __enter__(self): return self
             def __exit__(self, *args): pass
-            def iter_lines(self):
-                yield b'data: {"choices":[{"delta":{"content":"first"}}]}'
-                yield b'data: {"choices":[{"delta":{"content":"should-not-appear"}}]}'
+            def iter_content(self, chunk_size):
+                yield b'data: {"choices":[{"delta":{"content":"first"}}]}\n'
+                yield b'data: {"choices":[{"delta":{"content":"should-not-appear"}}]}\n'
+                yield b'data: [DONE]\n'
         c = webui.clients[self.owner()]
         with patch.object(webui, 'model_reply', lambda *a, **kw: Reply()):
             with webui.app.test_request_context('/chat', method='POST', json={'message':'hello'}):

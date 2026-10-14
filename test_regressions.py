@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -104,11 +105,16 @@ class CopyCompletionTests(unittest.TestCase):
         self.assertEqual(events[-1]['type'], 'blocked')
 
     def test_exact_copy_rejects_unsafe_or_ambiguous_paths(self):
-        self.ws.path('link').symlink_to('/opt/data/cache/scratch')
-        for goal in ('Copy proof.txt exactly to ../escape',
-                     'Copy proof.txt exactly to uploads/out',
-                     'Copy proof.txt exactly to link/out',
-                     'Copy missing.txt exactly to out'):
+        goals = ['Copy proof.txt exactly to ../escape',
+                 'Copy proof.txt exactly to uploads/out',
+                 'Copy missing.txt exactly to out']
+        try:
+            self.ws.path('link').symlink_to('/opt/data/cache/scratch')
+        except (OSError, NotImplementedError):
+            pass
+        else:
+            goals.append('Copy proof.txt exactly to link/out')
+        for goal in goals:
             with self.subTest(goal=goal):
                 self.assertEqual(self.run_actions([{'action': 'done', 'text': 'Done'}], goal)[-1]['type'], 'blocked')
 
@@ -126,7 +132,8 @@ class ByteCopyTests(CopyCompletionTests):
                 self.ws.path('source').write_bytes(raw)
                 self.ws.execute({'action': 'copy_file', 'source_path': 'source', 'path': 'target'})
                 self.assertEqual(self.ws.path('target').read_bytes(), raw)
-                self.assertEqual(self.ws.path('target').stat().st_mode & 0o777, 0o600)
+                if os.name != 'nt':
+                    self.assertEqual(self.ws.path('target').stat().st_mode & 0o777, 0o600)
                 self.assertNotIn('target', self.ws.checked)
 
     def test_copy_retains_bounds_and_upload_protection(self):

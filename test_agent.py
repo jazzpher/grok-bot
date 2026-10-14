@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -102,7 +103,10 @@ class LoopTests(unittest.TestCase):
     def test_path_and_symlinks(self):
         for p in ['../secret','/etc/passwd','.']:
             with self.assertRaises(ToolError): self.workspace.path(p)
-        (Path(self.tmp.name)/'link').symlink_to('/tmp')
+        try:
+            (Path(self.tmp.name)/'link').symlink_to('/tmp')
+        except (OSError, NotImplementedError):
+            self.skipTest('Creating symlinks requires platform privileges.')
         with self.assertRaises(ToolError): self.workspace.path('link/secret')
     def test_calculator(self):
         self.assertEqual(calculate('17 * 23'),391)
@@ -110,12 +114,21 @@ class LoopTests(unittest.TestCase):
             with self.assertRaises(ToolError): calculate(expression)
     def test_file_limits(self):
         with self.assertRaises(ToolError): self.workspace.execute({'action':'write_file','path':'x','content':'x'*32001})
+    def test_upload_directory_aliases_are_reserved_for_writes_and_copies(self):
+        self.workspace.execute({'action':'write_file','path':'uploads/source.txt','content':'original'}, allow_upload=True)
+        for path in ('Uploads/source.txt', 'uploads./source.txt', 'uploads /source.txt', '. /uploads/source.txt'):
+            with self.subTest(path=path), self.assertRaises(ToolError):
+                self.workspace.execute({'action':'write_file','path':path,'content':'overwritten'})
+            with self.subTest(copy_target=path), self.assertRaises(ToolError):
+                self.workspace.execute({'action':'copy_file','source_path':'uploads/source.txt','path':path})
+        self.assertEqual(self.workspace.path('uploads/source.txt').read_text(), 'original')
     def test_unsupported_tool(self):
         with self.assertRaises(ToolError): self.workspace.execute({'action':'shell','command':'whoami'})
 
 class WebTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
         webui.WORKSPACES=Path(self.tmp.name); webui.clients.clear(); webui.settings.clear()
         from task_harness import TaskManager
         self.manager=TaskManager(Path(self.tmp.name)/'tasks.db', Path(self.tmp.name))
@@ -123,8 +136,12 @@ class WebTests(unittest.TestCase):
         self.addCleanup(self.manager_patch.stop); self.addCleanup(self.manager.close)
         webui.app.config.update(TESTING=True, MOCK=True, API_KEY='')
         self.a=webui.app.test_client(); self.b=webui.app.test_client()
-    def tearDown(self): self.tmp.cleanup()
     def post(self, client, path, **kw): return client.post(path, base_url='http://localhost', **kw)
+    def wait_worker_gone(self, tid):
+        deadline = time.monotonic() + 5
+        while tid in self.manager.threads and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertNotIn(tid, self.manager.threads)
     def test_chat_utf8_and_isolation(self):
         r=self.post(self.a,'/chat',json={'message':'₱ hello'}); self.assertIn('₱',r.get_data(as_text=True))
         self.post(self.b,'/chat',json={'message':'other'}).get_data()
@@ -160,19 +177,125 @@ class WebTests(unittest.TestCase):
             def __init__(self,a): self.a=a
             def __enter__(self): return self
             def __exit__(self,*_): pass
-            def json(self): return {'choices':[{'message':{'content':json.dumps(self.a)}}]}
+            def iter_content(self, chunk_size):
+                yield json.dumps({'choices':[{'message':{'content':json.dumps(self.a)}}]}).encode()
         actions=[{'action':'calculate','expression':'17*23'}, {'action':'write_file','path':'answer.txt','content':'391'},
                  {'action':'read_file','path':'answer.txt'}, {'action':'done','text':'Checked 391 in answer.txt'}]
         with patch.object(webui,'model_reply',side_effect=[Reply(a) for a in actions]):
             response=self.post(self.a,'/task',json={'message':'calculate then save', 'checks':[{'type':'file_text','path':'answer.txt','text':'391'}]})
             self.assertEqual(response.status_code,202)
             tid=response.json['id']
-            self.manager.threads[tid].join(3)
+            self.wait_worker_gone(tid)
             row=self.a.get('/tasks/'+tid,base_url='http://localhost').json
         self.assertEqual(row['status'],'completed')
         with self.a.get('/files/answer.txt',base_url='http://localhost') as response:
             self.assertEqual(response.get_data(as_text=True),'391')
         self.assertEqual(self.b.get('/files/answer.txt',base_url='http://localhost').status_code,404)
+
+    def test_chat_stream_without_done_is_not_saved_as_complete(self):
+        webui.app.config.update(MOCK=False)
+        class Reply:
+            def __enter__(self): return self
+            def __exit__(self,*_): pass
+            def iter_content(self, chunk_size):
+                yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n'
+        with patch.object(webui, 'model_reply', lambda *a, **kw: Reply()):
+            response = self.post(self.a, '/chat', json={'message':'hello'})
+            body = response.get_data(as_text=True)
+        self.assertIn('interrupted', body.lower())
+        self.assertEqual(self.a.get('/history', base_url='http://localhost').json, [])
+
+    def test_chat_stream_skips_malformed_events(self):
+        webui.app.config.update(MOCK=False)
+        class Reply:
+            def __enter__(self): return self
+            def __exit__(self,*_): pass
+            def iter_content(self, chunk_size):
+                yield b'data: []\n'
+                yield b'data: {"choices":[{"delta":{"content":17}}]}\n'
+                yield b'data: {"choices":[{"delta":{"content":"safe"}}]}\n'
+                yield b'data: [DONE]\n'
+        with patch.object(webui, 'model_reply', lambda *a, **kw: Reply()):
+            response = self.post(self.a, '/chat', json={'message':'hello'})
+            body = response.get_data(as_text=True)
+        self.assertEqual(body, 'safe')
+        self.assertEqual(self.a.get('/history', base_url='http://localhost').json[-1]['content'], 'safe')
+
+    def test_chat_stream_provider_error_is_not_saved_as_complete(self):
+        webui.app.config.update(MOCK=False)
+        class Reply:
+            def __enter__(self): return self
+            def __exit__(self,*_): pass
+            def iter_content(self, chunk_size):
+                yield b'data: {"error":{"message":"provider failure"}}\n'
+                yield b'data: [DONE]\n'
+        with patch.object(webui, 'model_reply', lambda *a, **kw: Reply()):
+            response = self.post(self.a, '/chat', json={'message':'hello'})
+            body = response.get_data(as_text=True)
+        self.assertIn('error', body.lower())
+        self.assertEqual(self.a.get('/history', base_url='http://localhost').json, [])
+
+    def test_chat_stream_length_finish_is_not_saved_as_complete(self):
+        webui.app.config.update(MOCK=False)
+        class Reply:
+            def __enter__(self): return self
+            def __exit__(self,*_): pass
+            def iter_content(self, chunk_size):
+                yield b'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n'
+                yield b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n'
+                yield b'data: [DONE]\n'
+        with patch.object(webui, 'model_reply', lambda *a, **kw: Reply()):
+            response = self.post(self.a, '/chat', json={'message':'hello'})
+            body = response.get_data(as_text=True)
+        self.assertIn('truncated', body.lower())
+        self.assertEqual(self.a.get('/history', base_url='http://localhost').json, [])
+
+    def test_chat_stream_output_cap_prevents_saving_oversized_reply(self):
+        webui.app.config.update(MOCK=False)
+        class Reply:
+            def __enter__(self): return self
+            def __exit__(self,*_): pass
+            def iter_content(self, chunk_size):
+                content = 'é' * 64001
+                yield ('data: ' + json.dumps({'choices':[{'delta':{'content':content}}]}) + '\n').encode()
+                yield b'data: [DONE]\n'
+        with patch.object(webui, 'model_reply', lambda *a, **kw: Reply()):
+            response = self.post(self.a, '/chat', json={'message':'hello'})
+            body = response.get_data(as_text=True)
+        self.assertIn('limit', body.lower())
+        self.assertEqual(self.a.get('/history', base_url='http://localhost').json, [])
+
+    def test_chat_stream_body_cap_rejects_oversized_provider_body(self):
+        class Reply:
+            def iter_content(self, chunk_size):
+                yield b'x' * (webui.MAX_CHAT_RESPONSE_BYTES + 1)
+        with self.assertRaises(webui.ChatResponseTooLarge):
+            list(webui.iter_bounded_sse_lines(Reply()))
+
+    def test_task_provider_rejects_content_over_remaining_output_budget(self):
+        body = json.dumps({'choices':[{'message':{'content':'x' * 101}}]}).encode()
+        class Reply:
+            def __enter__(self): return self
+            def __exit__(self,*_): pass
+            def iter_content(self, chunk_size): yield body
+        def fake_model_reply(*args, **kwargs):
+            self.assertEqual(kwargs.get('response_limit'), 100 * 6 + 65536)
+            return Reply()
+        with patch.object(webui, 'model_reply', fake_model_reply):
+            provider = webui.task_provider()
+            with self.assertRaises(webui.OutputBudgetExceeded):
+                provider([], 100)
+
+    def test_streamed_provider_body_cap_ignores_missing_or_false_length(self):
+        for headers in ({}, {'Content-Length': '1'}):
+            with self.subTest(headers=headers):
+                class Reply:
+                    def __init__(self): self.headers = headers
+                    def iter_content(self, chunk_size):
+                        yield b'12345678'
+                        yield b'90!'
+                with self.assertRaises(webui.OutputBudgetExceeded):
+                    webui.read_limited_json_response(Reply(), 10)
     def test_clear_busy(self):
         self.a.get('/',base_url='http://localhost')
         c=next(iter(webui.clients.values()),None)
