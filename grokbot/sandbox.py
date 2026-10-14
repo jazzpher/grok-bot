@@ -53,6 +53,31 @@ DESTRUCTIVE = [
     (re.compile(r'\bcrontab\s+-r\b'), 'erases crontab'),
 ]
 
+# Refused outright, in every policy mode (even full-access + never). Not a complete list: it only catches the
+# unmistakably catastrophic forms. Everything else relies on the approval gate and the sandbox backend.
+HARDLINE = [
+    (re.compile(r'(^|[\s;&|])rm\s+(-[a-zA-Z]+\s+)*(/|~|\$HOME|/\*|~/\*)(\s|$)', re.I), 'deletes the filesystem root or home folder'),
+    (re.compile(r'\bmkfs(\.\w+)?\b'), 'formats a disk'),
+    (re.compile(r'\bdd\b[^\n]*\bof=/dev/'), 'writes raw data to a disk device'),
+    (re.compile(r'>\s*/dev/(sd|nvme|disk|hd)'), 'writes raw data to a disk device'),
+    (re.compile(r':\(\)\s*\{\s*:\|:&\s*\};:'), 'is a fork bomb'),
+    (re.compile(r'(^|[\s;&|])format\s+[a-z]:', re.I), 'formats a drive'),
+    (re.compile(r'(^|[\s;&|])(del|erase)\s+[^\n]*(/s)[^\n]*\b[a-z]:[\\/]*(\s|$)', re.I), 'deletes a whole drive'),
+    (re.compile(r'(^|[\s;&|])(rd|rmdir)\s+[^\n]*(/s)[^\n]*\b[a-z]:[\\/]*(\s|$)', re.I), 'deletes a whole drive'),
+    (re.compile(r'remove-item\s+[^\n]*-recurse[^\n]*\b[a-z]:\\?(\s|$)', re.I), 'deletes a whole drive'),
+    (re.compile(r'\b(diskpart|bcdedit|cipher\s+/w)\b', re.I), 'changes disks or the boot configuration'),
+    (re.compile(r'(curl|wget)[^|\n]*\|\s*(sudo\s+)?(ba|z|da)?sh\b'), 'pipes a download into a shell'),
+    (re.compile(r'(iwr|invoke-webrequest|irm|invoke-restmethod)[^|\n]*\|\s*(iex|invoke-expression)\b', re.I), 'pipes a download into PowerShell'),
+]
+
+
+def hardline_reason(command):
+    """Reason string for commands that are always refused, else None."""
+    for pattern, reason in HARDLINE:
+        if pattern.search(command):
+            return 'Refused: this command ' + reason + '. It is blocked in every policy mode.'
+    return None
+
 
 @dataclasses.dataclass
 class CommandResult:
@@ -121,9 +146,25 @@ def uses_network(command):
     return bool(re.search(r'https?://', command))
 
 
+# Windows-style references. shlex (POSIX mode) eats backslashes, so these scan the raw command text.
+WIN_DRIVE = re.compile(r'(?<![A-Za-z0-9_])[A-Za-z]:(?![A-Za-z0-9_/\\.-]*://)')   # C:\x, C:/x and drive-relative C:x
+WIN_UNC = re.compile(r'(^|[\s"\'=(])(\\\\|//)[^\s/\\]')                     # \\server\share, //server/share
+WIN_ENV = re.compile(r'%[A-Za-z_]+%|\$env:|\$\{?env:', re.I)                    # %USERPROFILE%, $env:APPDATA
+WIN_UP = re.compile(r'(^|[\s"\'=\\/])\.\.([\\/]|$|\s|"|\')')                     # ..\x, ..\
+WIN_ROOT = re.compile(r'(^|[\s"\'=])\\(?![\\])[^\s]')                              # \Windows\x (drive root of current drive)
+
+
 def escapes_workspace(command, root):
-    """Best-effort: absolute paths outside the workspace, ~ or cd .. style escapes."""
-    root = str(pathlib.Path(root).resolve())
+    """Best-effort: absolute paths outside the workspace, ~ or cd .. style escapes, Windows drive/UNC paths."""
+    root = str(root) if re.match(r'^[A-Za-z]:[\\/]', str(root)) else str(pathlib.Path(root).resolve())
+    if WIN_UNC.search(command) or WIN_ENV.search(command) or WIN_UP.search(command) or WIN_ROOT.search(command):
+        return True
+    for m in WIN_DRIVE.finditer(command):
+        rest = command[m.start():]
+        # A path inside the workspace root is fine (Windows hosts: root looks like C:\\Users\\x\\ws).
+        norm = rest.replace('\\', '/').lower()
+        if not norm.startswith(root.replace('\\', '/').lower() + '/') and norm.rstrip('"\' ') != root.replace('\\', '/').lower():
+            return True
     for tok in tokens(command):
         if tok.startswith('~'):
             return True
