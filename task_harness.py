@@ -15,12 +15,46 @@ except ImportError:  # Windows: lock the first byte, never silently skip exclusi
     import msvcrt
 import hashlib
 import inspect
+from urllib.parse import urlparse
 
 from agent_loop import RULES, ACTION_FIELDS, Workspace, ToolError, is_upload_path, parse_action
 
 ACTIVE = ('queued', 'running')
-RESUMABLE = ('stopped', 'interrupted', 'needs_input')
+RESUMABLE = ('stopped', 'interrupted', 'needs_input', 'blocked')
+MAX_RETRIES = 3
+RETRY_DELAY = 1.0
 DEFAULT_BUDGETS = {'steps': 12, 'elapsed': 300, 'output': 128000, 'context': 24000}
+
+
+def is_transient(exc):
+    """Provider failures worth an automatic retry: overload, gateway errors, timeouts."""
+    response = getattr(exc, 'response', None)
+    code = getattr(response, 'status_code', None)
+    return code in (500, 502, 503, 504) or isinstance(exc, (requests.Timeout, requests.ConnectionError))
+
+
+def friendly_provider_error(exc_or_code, url=None, retrying=False):
+    """Plain-language provider error text. Never includes keys, URLs or raw bodies."""
+    response = getattr(exc_or_code, 'response', None)
+    code = getattr(response, 'status_code', None) if not isinstance(exc_or_code, int) else exc_or_code
+    url = url or getattr(response, 'url', '') or ''
+    who = 'Google' if 'google' in (urlparse(str(url)).hostname or '') else 'The AI provider'
+    tail = ', retrying...' if retrying else '.'
+    if code == 503:
+        return who + ' is busy right now' + tail
+    if code in (500, 502, 504):
+        return who + ' had a temporary problem' + tail
+    if code is None and isinstance(exc_or_code, (requests.Timeout, requests.ConnectionError)):
+        return "Can't reach " + who + ' right now' + tail
+    if code == 404:
+        return 'No such model on your key. Check the model name in Settings.'
+    if code in (401, 403):
+        return 'Wrong key, or this key is not allowed. Check the key in Settings.' if code == 401 else 'This key is not allowed to use that model. Check the key in Settings.'
+    if code == 429:
+        return 'Free quota reached. Wait a bit, then try again.'
+    if code == 400:
+        return 'The provider rejected the request (HTTP 400). Check the model name in Settings.'
+    return 'Provider error' + (' (HTTP %s)' % code if code else '') + '. Check key, model and quota.'
 
 
 class OutputBudgetExceeded(Exception):
@@ -318,14 +352,12 @@ class TaskManager:
                     finish('budget_exhausted', 'Provider response exceeded the remaining output budget; action discarded.')
                     return
                 except (requests.RequestException,) as exc:
-                    response = getattr(exc, 'response', None)
-                    code = response.status_code if response is not None else None
-                    transient = code in (500, 502, 503, 504) or isinstance(exc, (requests.Timeout, requests.ConnectionError))
+                    transient = is_transient(exc)
                     state['retry_streak'] += 1
-                    if not transient or state['retry_streak'] >= 3:
-                        finish('blocked', 'Provider failed' + (' (HTTP %s)' % code if code else '') + '; no completion. Authentication/quota errors are not retried.'); return
-                    self.save(tid, 'running', state, {'type': 'retry', 'text': 'Transient provider failure; bounded retry.'})
-                    self.stops[tid].wait(.05 * state['retry_streak'])
+                    if not transient or state['retry_streak'] > MAX_RETRIES:
+                        finish('blocked', friendly_provider_error(exc) + ' Task paused, nothing was lost. Press Resume to continue.'); return
+                    self.save(tid, 'running', state, {'type': 'retry', 'text': friendly_provider_error(exc).rstrip('.') + ', retrying %d of %d...' % (state['retry_streak'], MAX_RETRIES)})
+                    self.stops[tid].wait(min(RETRY_DELAY * state['retry_streak'], 4))
                     continue
                 except (ValueError, TypeError, AttributeError):
                     state['messages'].append({'role': 'user', 'content': 'Invalid action; return valid JSON. No tool executed.'})
