@@ -20,6 +20,11 @@ background worker. [HARNESS.md](HARNESS.md) documents checks, resume, API,
 budgets, persistence, retention and deployment limits. Completion requires
 explicit supported artifact checks; a budget stop is never success.
 
+Settings shows the saved key masked (first 4 and last 3 characters, masked on the
+server so the full key never returns to the browser) and a Test button that sends one
+tiny request and reports OK, or a plain 401 (wrong key), 404 (no such model), 429
+(quota) or 503 (provider busy) message. Test uses a small amount of your free quota.
+
 Gemini can work with an eligible free-tier API key, subject to your account's
 model availability and quota. Each step is a separate model request, so tasks
 use more quota than ordinary chat. No paid services are added by this code.
