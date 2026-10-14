@@ -6,6 +6,7 @@ import ipaddress
 import json
 import os
 import secrets
+import socket
 import threading
 import time
 from pathlib import Path
@@ -25,13 +26,30 @@ MAX_CHAT_OUTPUT_BYTES = 128000
 RETRY_MARK, RETRY_END = '\x1e', '\x1f'
 MAX_CHAT_RESPONSE_BYTES = MAX_CHAT_OUTPUT_BYTES * 6 + 65536
 SYSTEM_PROMPT = 'You are a helpful assistant. Do not claim to be a particular provider or model unless verified. Be honest about available tools.'
-ALLOWED_API_URLS = {
-    'https://api.x.ai/v1/chat/completions',
-    'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
-}
+# Trusted OpenAI-compatible chat endpoints, verified against each provider's docs.
+# Only these URLs (plus a validated custom one, or the owner's local provider) may
+# receive the user's key. model_hint is the model used when the user leaves Model blank.
+PROVIDER_ROWS = [
+    ('gemini', 'Google Gemini', 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', 'gemini-flash-latest'),
+    ('nvidia', 'NVIDIA NIM', 'https://integrate.api.nvidia.com/v1/chat/completions', ''),
+    ('openrouter', 'OpenRouter', 'https://openrouter.ai/api/v1/chat/completions', ''),
+    ('groq', 'Groq', 'https://api.groq.com/openai/v1/chat/completions', ''),
+    ('cerebras', 'Cerebras', 'https://api.cerebras.ai/v1/chat/completions', ''),
+    ('mistral', 'Mistral', 'https://api.mistral.ai/v1/chat/completions', ''),
+    ('deepseek', 'DeepSeek', 'https://api.deepseek.com/chat/completions', ''),
+    ('xai', 'xAI Grok', 'https://api.x.ai/v1/chat/completions', ''),
+]
+PROVIDERS = {pid: {'label': label, 'url': url, 'model_hint': hint}
+             for pid, label, url, hint in PROVIDER_ROWS}
+ALLOWED_API_URLS = {p['url'] for p in PROVIDERS.values()}
 # A local provider may be configured by the server owner, never through public settings.
 if urlparse(API_URL).hostname in ('127.0.0.1', 'localhost'):
     ALLOWED_API_URLS.add(API_URL)
+# Key prefixes that identify a provider when neither provider nor URL is given.
+KEY_PREFIXES = (('AIza', 'gemini'), ('AQ.', 'gemini'), ('nvapi-', 'nvidia'),
+                ('sk-or-', 'openrouter'), ('gsk_', 'groq'))
+# Custom https endpoints validated at save time. Memory-only, guarded by provider_lock.
+custom_endpoints = set()
 
 PAGE = r"""<!doctype html>
 <html lang="en">
@@ -70,7 +88,7 @@ PAGE = r"""<!doctype html>
   #settings { display: none; padding: 10px 16px; border-bottom: 1px solid #1c222a;
               flex-wrap: wrap; gap: 8px; align-items: center; }
   #settings.open { display: flex; }
-  #settings input { background: #10151b; color: #e6e9ec; border: 1px solid #242c35;
+  #settings input, #settings select { background: #10151b; color: #e6e9ec; border: 1px solid #242c35;
                     border-radius: 8px; padding: 8px 10px; font-size: 12px; flex: 1; min-width: 150px; }
   #settings input:focus { outline: none; border-color: #4cc38a; }
   #settings button { background: #1a2027; color: #d6dbe1; border: 1px solid #242c35;
@@ -165,8 +183,9 @@ PAGE = r"""<!doctype html>
     <span id="status" role="status" aria-live="polite">Ready</span>
   </div>
   <div id="settings">
-    <input id="keyin" type="password" placeholder="API key (Gemini, Grok, ...)" autocomplete="off">
-    <input id="urlin" placeholder="API URL (optional, blank = auto)" autocomplete="off">
+    <select id="providersel" aria-label="Provider" onchange="providerChanged()"></select>
+    <input id="keyin" type="password" placeholder="API key" autocomplete="off">
+    <input id="urlin" placeholder="Custom API URL (public https only)" autocomplete="off" style="display:none">
     <input id="modelin" placeholder="Model (optional, blank = auto)" autocomplete="off">
     <button onclick="saveKey()">Save</button>
     <button id="testbtn" onclick="testKey()">Test</button>
@@ -509,9 +528,35 @@ async function showFiles() {
   scrollChat();
 }
 
-function toggleSettings() {
+let providerList = [];
+let currentProviderId = '';
+async function loadProviders() {
+  try {
+    const res = await fetch('/providers'); if (!res.ok) return;
+    providerList = await res.json();
+    const sel = document.getElementById('providersel');
+    const current = sel.value; sel.replaceChildren();
+    for (const p of providerList) {
+      const op = document.createElement('option'); op.value = p.id; op.textContent = p.label; sel.appendChild(op);
+    }
+    const custom = document.createElement('option'); custom.value = 'custom'; custom.textContent = 'Custom URL (advanced)'; sel.appendChild(custom);
+    const wanted = current || currentProviderId;
+    if (providerList.some(p => p.id === wanted) || wanted === 'custom') sel.value = wanted;
+    providerChanged();
+  } catch (_) { /* leave the picker empty; Save still accepts a typed key */ }
+}
+function providerChanged() {
+  const sel = document.getElementById('providersel');
+  const custom = sel.value === 'custom';
+  document.getElementById('urlin').style.display = custom ? '' : 'none';
+  const p = providerList.find(x => x.id === sel.value);
+  document.getElementById('modelin').placeholder = p && p.model_hint ? 'Model (blank = ' + p.model_hint + ')' : 'Model (optional, blank = auto)';
+}
+async function toggleSettings() {
   const open = document.getElementById('settings').classList.toggle('open');
-  if (open) refreshKeyStatus();
+  if (open) { await refreshKeyStatus(); loadProviders(); }
+  const side = document.getElementById('sidebar');
+  if (side.classList && side.classList.contains('open')) side.classList.remove('open');
 }
 
 function setKeyStatus(text, cls, busy) {
@@ -523,6 +568,7 @@ async function refreshKeyStatus() {
   try {
     const res = await fetch('/key_status'); if (!res.ok) return;
     const s = await res.json();
+    currentProviderId = s.provider_id || '';
     box.textContent = '';
     if (!s.configured) { box.textContent = 'No key saved yet.'; return; }
     const b = document.createElement('b'); b.textContent = s.masked;
@@ -547,10 +593,13 @@ function toggleSidebar() {
 }
 
 async function saveKey() {
+  const sel = document.getElementById('providersel');
+  const custom = sel && sel.value === 'custom';
   const saveRes = await fetch('/set_key', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({key: keyin.value, url: urlin.value, model: modelin.value})
+    body: JSON.stringify({key: keyin.value, url: custom ? urlin.value : '', model: modelin.value,
+                          provider: custom ? '' : (sel ? sel.value : '')})
   });
   const st = await saveRes.text();
   setKeyStatus(st, saveRes.ok ? 'ok' : 'bad');
@@ -695,7 +744,7 @@ def config_snapshot():
 
 def model_reply(messages, cfg, stream=False, structured=False, response_limit=None, extra=None, timeout=(10, 45)):
     key, url, model = cfg
-    if url not in ALLOWED_API_URLS:
+    if not url_allowed(url):
         raise ValueError('Unsupported provider URL.')
     payload = {'model': model, 'messages': messages, 'stream': stream}
     if extra: payload.update(extra)
@@ -1130,6 +1179,66 @@ def download(name):
     except ValueError:
         return Response('Invalid file path.', status=400)
 
+
+def provider_label(url):
+    """Display name for an endpoint: preset label, else just the hostname."""
+    for p in PROVIDERS.values():
+        if p['url'] == url:
+            return p['label']
+    return urlparse(url).hostname or ''
+
+
+def url_allowed(url):
+    if url in ALLOWED_API_URLS:
+        return True
+    with provider_lock:
+        return url in custom_endpoints
+
+
+def custom_url_error(url):
+    """None when a custom endpoint is safe enough to save, else an error message.
+
+    Custom endpoints must be public https URLs: no http, no userinfo, and no
+    private/loopback/link-local addresses (by literal or DNS), so a saved key
+    can never be POSTed into the server's own network. DNS is re-resolved by
+    the HTTP client at request time; this check is best-effort hardening, not
+    a guarantee against a hostile DNS rebinding.
+    """
+    if len(url) > 200:
+        return 'That URL is too long.'
+    try:
+        p = urlparse(url)
+    except ValueError:
+        return 'That URL is not valid.'
+    if p.scheme != 'https':
+        return 'Custom endpoints must use https.'
+    if p.username or p.password:
+        return 'URLs with a username or password are not allowed.'
+    host = p.hostname
+    if not host:
+        return 'That URL is not valid.'
+    try:
+        ips = [ipaddress.ip_address(host)]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, p.port or 443, proto=socket.IPPROTO_TCP)
+        except OSError:
+            return 'Could not verify that host. Pick a listed provider or a public https endpoint.'
+        ips = []
+        for info in infos:
+            try:
+                ips.append(ipaddress.ip_address(info[4][0]))
+            except (ValueError, IndexError, TypeError):
+                pass
+    if not ips:
+        return 'Could not verify that host. Pick a listed provider or a public https endpoint.'
+    for ip in ips:
+        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
+                or ip.is_reserved or ip.is_unspecified):
+            return 'Custom endpoints must be public internet addresses.'
+    return None
+
+
 def mask_key(key):
     """Server-side mask: first 4 + last 3 characters. Short keys reveal nothing."""
     if not isinstance(key, str) or not key: return ''
@@ -1141,8 +1250,9 @@ def key_state():
     key, url, model = config_snapshot()
     with provider_lock:
         saved = bool(settings.get('key_override'))
+    pid = next((pid for pid, p in PROVIDERS.items() if p['url'] == url), '')
     return {'configured': bool(key), 'masked': mask_key(key), 'source': ('saved' if saved else 'environment') if key else 'none',
-            'model': model, 'provider': 'Google Gemini' if 'google' in (urlparse(url).hostname or '') else (urlparse(url).hostname or '')}
+            'model': model, 'provider': provider_label(url), 'provider_id': pid}
 
 
 @app.route('/key_status')
@@ -1179,6 +1289,13 @@ def test_key():
         return {'ok': False, 'status': None, 'message': 'Unsupported provider URL.'}
 
 
+@app.route('/providers')
+def list_providers():
+    # Trusted provider presets for the Settings picker. No secrets here.
+    return [{'id': pid, 'label': p['label'], 'url': p['url'], 'model_hint': p['model_hint']}
+            for pid, p in PROVIDERS.items()]
+
+
 @app.route('/set_key', methods=['POST'])
 def set_key():
     if request.content_length and request.content_length > 40000:
@@ -1186,15 +1303,27 @@ def set_key():
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return Response('Send a JSON object.', status=400)
-    key, url, model = (data.get(k, '') for k in ('key', 'url', 'model'))
-    if not all(isinstance(v, str) for v in (key, url, model)):
+    key, url, model, provider = (data.get(k, '') for k in ('key', 'url', 'model', 'provider'))
+    if not all(isinstance(v, str) for v in (key, url, model, provider)):
         return Response('Invalid settings.', status=400)
-    key, url, model = key.strip(), url.strip(), model.strip()
-    gemini = key.startswith(('AIza', 'AQ.'))
-    if gemini and not url:
-        url = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
-    if url and url not in ALLOWED_API_URLS:
-        return Response('Only configured, trusted provider endpoints are allowed.', status=400)
+    key, url, model, provider = key.strip(), url.strip(), model.strip(), provider.strip()
+    if provider:
+        if provider not in PROVIDERS:
+            return Response('Unknown provider. Pick one from the list.', status=400)
+        if url:
+            return Response('Pick a provider from the list or a custom URL, not both.', status=400)
+        url = PROVIDERS[provider]['url']
+    if not url and key:
+        for prefix, pid in KEY_PREFIXES:
+            if key.startswith(prefix):
+                url, provider = PROVIDERS[pid]['url'], pid
+                break
+    custom = False
+    if url and not url_allowed(url):
+        err = custom_url_error(url)
+        if err:
+            return Response(err, status=400)
+        custom = True
     with provider_lock:
         current_url = settings.get('url_override') or API_URL
         # Never forward a stored credential to a different endpoint.
@@ -1203,8 +1332,12 @@ def set_key():
         if key: settings['key_override'] = key
         if url: settings['url_override'] = url
         if model: settings['model_override'] = model
-        elif gemini: settings['model_override'] = 'gemini-flash-latest'
-    return Response('Saved in memory only. Gemini selected.' if gemini else 'Saved in memory only.', content_type='text/plain')
+        elif provider and PROVIDERS[provider]['model_hint'] and (key or url):
+            settings['model_override'] = PROVIDERS[provider]['model_hint']
+        if custom: custom_endpoints.add(url)
+    label = provider_label(settings.get('url_override') or API_URL)
+    if custom: label += ' (custom URL)'
+    return Response('Saved in memory only. %s selected.' % label, content_type='text/plain')
 
 
 def main():
