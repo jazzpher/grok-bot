@@ -20,10 +20,21 @@ background worker. [HARNESS.md](HARNESS.md) documents checks, resume, API,
 budgets, persistence, retention and deployment limits. Completion requires
 explicit supported artifact checks; a budget stop is never success.
 
-Settings shows the saved key masked (first 4 and last 3 characters, masked on the
-server so the full key never returns to the browser) and a Test button that sends one
-tiny request and reports OK, or a plain 401 (wrong key), 404 (no such model), 429
-(quota) or 503 (provider busy) message. Test uses a small amount of your free quota.
+Settings has a provider picker: choose a trusted OpenAI-compatible provider
+(Google Gemini, NVIDIA NIM, OpenRouter, Groq, Cerebras, Mistral, DeepSeek, xAI
+Grok), paste your key and, if needed, a model name. The endpoint comes from a
+server-side list, not from the browser. Common key prefixes (AIza..., nvapi-...,
+sk-or-..., gsk_...) select the matching provider automatically. Settings shows the
+saved key masked (first 4 and last 3 characters, masked on the server so the full
+key never returns to the browser) and a Test button that sends one tiny request
+and reports OK, or a plain 401 (wrong key), 404 (no such model), 429 (quota) or
+503 (provider busy) message. Test uses a small amount of your free quota.
+
+A Custom URL (advanced) choice exists for other OpenAI-compatible endpoints. It
+only accepts public https addresses: http, userinfo, and private, loopback or
+link-local addresses (literal or resolved) are rejected, because the key is POSTed
+to that endpoint. The DNS check is best-effort hardening, not a guarantee against
+a hostile hostname; prefer the listed providers.
 
 Gemini can work with an eligible free-tier API key, subject to your account's
 model availability and quota. Each step is a separate model request, so tasks
@@ -95,8 +106,9 @@ rotate a previously exposed key. settings.json and workspaces are ignored by git
 
 Sessions have separate chat histories/workspaces. The provider settings are
 still shared for this single-owner app: do not distribute the password or
-use it as a public service. Settings only allow xAI and Gemini endpoints (or a
-loopback provider configured by the server owner). Switching endpoints
+use it as a public service. Settings only allow the listed provider endpoints,
+a validated public custom https endpoint, or a loopback provider configured by
+the server owner. Switching endpoints
 requires supplying a new key, preventing forwarding the previous saved key.
 The old unauthenticated /debug endpoint is removed. Login has a small failed
 attempt limit; this is basic protection, not a full production auth system.
