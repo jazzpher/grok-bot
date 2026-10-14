@@ -33,12 +33,26 @@ def is_transient(exc):
     return code in (500, 502, 503, 504) or isinstance(exc, (requests.Timeout, requests.ConnectionError))
 
 
+PROVIDER_NAMES = (('google', 'Google'), ('nvidia', 'NVIDIA'), ('openrouter', 'OpenRouter'),
+                  ('groq', 'Groq'), ('cerebras', 'Cerebras'), ('mistral', 'Mistral'),
+                  ('deepseek', 'DeepSeek'), ('x.ai', 'xAI'))
+
+
+def provider_name(url):
+    """Short provider name from an endpoint hostname, for friendly error text."""
+    host = urlparse(str(url)).hostname or ''
+    for fragment, name in PROVIDER_NAMES:
+        if fragment in host:
+            return name
+    return 'The AI provider'
+
+
 def friendly_provider_error(exc_or_code, url=None, retrying=False):
     """Plain-language provider error text. Never includes keys, URLs or raw bodies."""
     response = getattr(exc_or_code, 'response', None)
     code = getattr(response, 'status_code', None) if not isinstance(exc_or_code, int) else exc_or_code
     url = url or getattr(response, 'url', '') or ''
-    who = 'Google' if 'google' in (urlparse(str(url)).hostname or '') else 'The AI provider'
+    who = provider_name(url)
     tail = ', retrying...' if retrying else '.'
     if code == 503:
         return who + ' is busy right now' + tail
