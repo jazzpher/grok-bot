@@ -302,7 +302,12 @@ class AgentHTTPTests(unittest.TestCase):
         self.assertFalse(next(e for e in events if e['type'] == 'tool_end')['ok'])
         events = self.agent('!tool run_command {"command": "echo hi"}', events[0]['id'])
         end = next(e for e in events if e['type'] == 'tool_end')
-        self.assertTrue(end['ok']); self.assertIn('hi', end['output'])
+        from grokbot import sandbox as _sb
+        if _sb.get_backend().isolated:
+            self.assertTrue(end['ok']); self.assertIn('hi', end['output'])
+        else:  # no Docker: even read-only commands need approval, and "never" denies without prompting
+            self.assertFalse(end['ok'])
+            self.assertNotIn('approval_required', [e['type'] for e in events])
 
     def test_conversation_management_routes(self):
         a = self.agent('first topic about kittens')[0]['id']
