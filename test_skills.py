@@ -223,4 +223,131 @@ class SkillsHTTP(unittest.TestCase):
         self.assertEqual(self.client.post('/skills/copy/delete',json=[]).status_code,400)
         self.assertEqual(self.client.post('/skills',data='x'*19000).status_code,413)
 
+
+class LargeSkills(unittest.TestCase):
+    setUp = Skills.setUp
+    tearDown = Skills.tearDown
+    def seed(self, count=500, description='Workflow'):
+        for i in range(count):
+            name = f'workflow-{i:03d}'
+            path = self.store.path(name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            raw = '---\nname: ' + name + '\ndescription: ' + json.dumps(description) + '\n---\n' + BODY
+            path.write_text(raw, encoding='utf-8')
+            self.store.write_metadata(name, {'created': 1, 'last_used': time.time(), 'uses': 0,
+                                            'archived': False, 'created_by': 'user', 'pinned': False})
+
+    def test_500_and_501_edit_delete_and_isolation(self):
+        self.assertEqual(MAX_SKILLS, 500)
+        self.seed(499)
+        row = self.store.save('last-slot', 'Last slot', BODY)
+        self.assertEqual(len(self.store.list()), 500)
+        with self.assertRaisesRegex(ValueError, r'limit reached \(500\)'):
+            self.store.save('overflow', 'Overflow', BODY)
+        self.assertFalse(self.store.path('overflow').exists())
+        self.store.save('last-slot', 'Updated', BODY, row['revision'])
+        self.store.delete('workflow-000', self.store.read('workflow-000')['revision'])
+        self.store.save('replacement', 'Replacement', BODY)
+        self.assertEqual(len(self.store.list()), 500)
+        self.assertEqual(SkillStore(self.root/'workspaces'/'bob').list(), [])
+
+    def test_archives_free_slots_and_restore_cannot_exceed_500(self):
+        self.seed()
+        meta = self.store.metadata('workflow-000')
+        meta.update(created_by='agent', last_used=time.time() - 31 * 86400)
+        self.store.write_metadata('workflow-000', meta)
+        self.assertEqual(len(self.store.list()), 499)
+        row = self.store.read('workflow-000')
+        self.store.save('replacement', 'Replacement', BODY)
+        self.assertEqual(len(self.store.list(True)), 501)
+        self.assertEqual(len(self.store.list()), 500)
+        with self.assertRaisesRegex(ValueError, 'before restoring'):
+            self.store.restore('workflow-000', row['revision'])
+        self.assertTrue(self.store.metadata('workflow-000')['archived'])
+        self.store.delete('replacement', self.store.read('replacement')['revision'])
+        self.store.restore('workflow-000', row['revision'])
+        self.assertEqual(len(self.store.list()), 500)
+        self.assertEqual(self.store.use('workflow-000')['name'], 'workflow-000')
+
+    def test_large_index_bound_relevance_pin_recency_and_unicode(self):
+        self.seed(description='漢' * 160)
+        old = self.store.read('workflow-499')
+        self.store.save('workflow-499', 'Spreadsheet reconciliation', BODY, old['revision'])
+        pinned = self.store.read('workflow-001')
+        self.store.set_pinned('workflow-001', pinned['revision'], True)
+        rendered = self.store.index_context('Spreadsheet')
+        self.assertLessEqual(len(rendered.encode('utf-8')), 6000)
+        rows = json.loads(rendered.split('\n')[1])
+        self.assertLessEqual(len(rows), 30)
+        self.assertEqual(rows[0]['name'], 'workflow-499')
+        self.assertEqual(rows[1]['name'], 'workflow-001')
+        self.assertNotIn(BODY, rendered)
+        self.assertIn('Other skills remain saved', rendered)
+        self.assertEqual(self.store.use('workflow-200')['name'], 'workflow-200')
+        recent = self.store.index_context()
+        self.assertEqual(json.loads(recent.split('\n')[1])[1]['name'], 'workflow-200')
+
+    def test_bounded_paging_search_validation_and_all_names_reachable(self):
+        self.seed(description='漢' * 160)
+        ws = Workspace(self.root/'workspaces'/'alice')
+        names = []; offset = 0
+        while offset is not None:
+            output = ws.execute({'action': 'list_skills', 'path': str(offset)})
+            self.assertLessEqual(len(output.encode('utf-8')), 6000)
+            page = json.loads(output)
+            self.assertLessEqual(len(page['skills']), 20)
+            names.extend(r['name'] for r in page['skills'])
+            offset = page['next_offset']
+        self.assertEqual(len(names), 500)
+        self.assertEqual(len(set(names)), 500)
+        page = self.store.list_page('workflow-499')
+        self.assertEqual(page['total'], 1)
+        self.assertEqual(page['skills'][0]['name'], 'workflow-499')
+        self.assertEqual(self.store.list_page('missing-word')['skills'], [])
+        for offset in ('-1', '501', 'abc', 2, True):
+            with self.assertRaises(ValueError):
+                ws.execute({'action': 'list_skills', 'path': offset})
+        for query in (None, ['x'], 'x' * 501):
+            with self.assertRaises(ValueError): self.store.list_page(query)
+        self.assertEqual(self.store.list_page(offset=500)['next_offset'], None)
+
+
+    def test_large_library_http_count_and_model_task_context(self):
+        self.seed()
+        import webui
+        old_root, old_tasks = webui.WORKSPACES, webui.TASKS
+        try:
+            webui.WORKSPACES = self.root/'workspaces'
+            webui.TASKS = None
+            webui.clients.clear()
+            client = webui.app.test_client()
+            with client.session_transaction() as session:
+                session['sid'] = 'alice'
+            # Resolve the actual session workspace rather than assume the cookie key.
+            with client:
+                client.get('/skills')
+                actual = webui.client()['workspace'].skills
+                self.assertEqual(len(actual.list()), 500)
+                self.assertEqual(len(client.get('/skills').json), 500)
+        finally:
+            webui.clients.clear(); webui.WORKSPACES = old_root
+            if webui.TASKS: webui.TASKS.close()
+            webui.TASKS = old_tasks
+        manager = TaskManager(self.root/'tasks.sqlite3', self.root/'workspaces')
+        seen = []
+        def provider(messages):
+            seen.append(messages)
+            return json.dumps({'action': 'need_input', 'text': 'Test reached provider'})
+        try:
+            tid = manager.submit('alice', 'Use workflow-499', [], provider)
+            for _ in range(200):
+                if manager.get(tid, 'alice')['status'] not in ('queued', 'running'): break
+                time.sleep(.01)
+            self.assertEqual(manager.get(tid, 'alice')['status'], 'needs_input')
+            self.assertTrue(seen)
+            self.assertLess(len(json.dumps(seen[0], ensure_ascii=False)), 24000)
+            self.assertIn('workflow-499', seen[0][0]['content'])
+        finally:
+            manager.close()
+
 if __name__=='__main__': unittest.main()
