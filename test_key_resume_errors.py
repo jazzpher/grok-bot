@@ -130,7 +130,7 @@ class FriendlyTextTests(unittest.TestCase):
         self.assertEqual(friendly_provider_error(mk(503), retrying=True), 'Google is busy right now, retrying...')
         self.assertIn('No such model', friendly_provider_error(mk(404)))
         self.assertIn('Wrong key', friendly_provider_error(mk(401)))
-        self.assertTrue(friendly_provider_error(mk(503, 'https://api.x.ai/v1/chat/completions')).startswith('The AI provider is busy'))
+        self.assertTrue(friendly_provider_error(mk(503, 'https://api.x.ai/v1/chat/completions')).startswith('xAI is busy'))
         self.assertIn('HTTP 418', friendly_provider_error(mk(418)))
         self.assertNotIn('googleapis', friendly_provider_error(mk(404)))
 
