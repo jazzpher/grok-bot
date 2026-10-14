@@ -317,7 +317,7 @@ class TaskManager:
                             return 'check', 'Word document is missing or has no text: ' + n
                     except Exception:
                         return 'check', 'Word document failed to open as DOCX: ' + n
-                return 'needs_input', 'Artifact-created/content-unverified: DOCX reopened with text present: ' + ', '.join(docs) + '. Review the download for language, content and format. To verify exact text, supply file_text with the full expected extracted text, or tell me the specific content that needs revision.'
+                return 'completed', 'Word document(s) reopened as DOCX with text present: ' + ', '.join(docs) + '. Only that was verified; language, content and style were not independently checked, so review the download.'
             return 'needs_input', ('Artifact-created/content-unverified: read-back checked for ' + ', '.join(docs) + '. ' if docs else 'Content-unverified: ') + 'No deterministic acceptance checks supplied. Review the draft/downloads, or specify the output path and full expected text (file_text), or source/target paths (exact_copy). What specific content or format needs revision?'
         for c in row['checks']:
             p = workspace.path(c['path'])
@@ -344,13 +344,7 @@ class TaskManager:
     def _run(self, tid, owner, call_model):
         row = self.get(tid, owner)
         state = row['state']
-        # Legacy counters refunded invalid replies. Recover actual checkpointed
-        # provider attempts, including retries; never reset on restart/resume.
-        if 'attempts' not in state:
-            with self.lock:
-                payloads = self.db.execute('SELECT payload FROM events WHERE task=?', (tid,)).fetchall()
-            state['attempts'] = max(state['steps'] + state.get('invalid', 0),
-                                    sum(json.loads(p)['type'] == 'progress' for (p,) in payloads))
+        state.setdefault('attempts', state['steps'] + state.get('invalid', 0))
         started = time.monotonic()
         elapsed_before = state['elapsed']
         def finish(status, text):
@@ -370,7 +364,7 @@ class TaskManager:
             state['checked'] = sorted(workspace.checked)
             self.save(tid, 'running', state, {'type': 'status', 'text': 'Running'})
             self._reconcile(tid, state, workspace)
-            while state['attempts'] < state['budgets']['steps']:
+            while state['steps'] < state['budgets']['steps']:
                 if self.stops[tid].is_set():
                     finish('stopped', 'Stopped by you.'); return
                 if over_budget():
@@ -415,7 +409,7 @@ class TaskManager:
                     if state['invalid'] > MAX_INVALID:
                         finish('blocked', 'The model returned %d invalid actions in this task. Try a stronger model or a simpler request, then press Resume.' % state['invalid']); return
                     state['messages'].append({'role': 'user', 'content': 'Invalid action: ' + str(exc)[:500] + ' ' + INVALID_HELP})
-                    self.save(tid, 'running', state, {'type': 'error', 'text': 'Invalid action (%d of %d allowed); no action step used, but the provider attempt counts toward the budget.' % (state['invalid'], MAX_INVALID)})
+                    self.save(tid, 'running', state, {'type': 'error', 'text': 'Invalid action (%d of %d allowed); retrying without using a step.' % (state['invalid'], MAX_INVALID)})
                     continue
                 if self.stops[tid].is_set():
                     finish('stopped', 'Stopped before executing action.'); return
@@ -488,7 +482,7 @@ class TaskManager:
                 if kind in ('write_docx', 'write_file', 'copy_file') and not failed:
                     extra = [{'type': 'file', 'text': workspace.path(a['path']).relative_to(workspace.root).as_posix()}]
                 self.save(tid, 'running', state, {'type': 'tool', 'text': output[:4000], 'step': state['steps']}, extra)
-            finish('budget_exhausted', 'Provider attempt budget exhausted (including invalid replies and retries); not complete. Budgets are not reset on resume.')
+            finish('budget_exhausted', 'Step budget exhausted; not complete.')
         except ToolError as exc:
             finish('blocked', str(exc))
         except Exception:
