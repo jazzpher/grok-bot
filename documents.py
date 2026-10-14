@@ -40,3 +40,53 @@ def extract_text(name, raw):
     if len(text.encode('utf-8')) > MAX_TEXT:
         raise ValueError('Extracted text exceeds 32 KB. Upload a smaller document.')
     return text
+
+
+W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+MAX_DOCX_PARAGRAPHS = 500
+
+
+def docx_paragraphs(text):
+    """Paragraph strings a .docx built from text will contain (blank lines kept)."""
+    text = ''.join(ch for ch in text if ch in '\n\r\t' or ord(ch) >= 32)
+    return [line[2:] if line.startswith('# ') else line for line in text.replace('\r\n', '\n').split('\n')]
+
+
+def build_docx(text):
+    """Deterministic minimal Word document from plain text. Stdlib only, no macros.
+    One paragraph per line; a line starting with '# ' becomes a bold, larger heading."""
+    from xml.sax.saxutils import escape
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError('Document text must not be empty.')
+    text = ''.join(ch for ch in text if ch in '\n\r\t' or ord(ch) >= 32)
+    lines = text.replace('\r\n', '\n').split('\n')
+    if len(lines) > MAX_DOCX_PARAGRAPHS:
+        raise ValueError('Documents are limited to %d lines.' % MAX_DOCX_PARAGRAPHS)
+    body = []
+    for line in lines:
+        props = ''
+        if line.startswith('# '):
+            line, props = line[2:], '<w:rPr><w:b/><w:sz w:val="32"/></w:rPr>'
+        body.append('<w:p><w:r>%s<w:t xml:space="preserve">%s</w:t></w:r></w:p>' % (props, escape(line)))
+    document = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<w:document xmlns:w="%s"><w:body>%s</w:body></w:document>' % (W_NS, ''.join(body)))
+    parts = [
+        ('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+         '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+         '<Default Extension="xml" ContentType="application/xml"/>'
+         '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+         '</Types>'),
+        ('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+         '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+         '</Relationships>'),
+        ('word/document.xml', document),
+    ]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as archive:
+        for name, xml in parts:
+            info = zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0))  # fixed time: same input, same bytes
+            info.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(info, xml.encode('utf-8'))
+    return buf.getvalue()

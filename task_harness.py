@@ -17,7 +17,7 @@ import hashlib
 import inspect
 from urllib.parse import urlparse
 
-from agent_loop import RULES, ACTION_FIELDS, Workspace, ToolError, is_upload_path, parse_action
+from agent_loop import RULES, ACTION_FIELDS, Workspace, ToolError, is_upload_path, parse_action, INVALID_HELP, MAX_INVALID, build_docx, extract_text
 
 ACTIVE = ('queued', 'running')
 RESUMABLE = ('stopped', 'interrupted', 'needs_input', 'blocked')
@@ -272,11 +272,13 @@ class TaskManager:
         if not a:
             return
         # Never re-execute an action whose checkpointed outcome is unknown.
-        if a['action'] in ('write_file', 'copy_file'):
+        if a['action'] in ('write_file', 'copy_file', 'write_docx'):
             target = workspace.path(a['path'])
             digest = state.get('pending_digest')
             if a['action'] == 'write_file':
                 digest = hashlib.sha256(a['content'].encode('utf-8')).hexdigest()
+            if a['action'] == 'write_docx':
+                digest = hashlib.sha256(build_docx(a['content'])).hexdigest()
             if digest is None or not target.is_file() or target.stat().st_size > 32000 or hashlib.sha256(target.read_bytes()).hexdigest() != digest:
                 raise ToolError('Interrupted write outcome cannot be verified. No action replayed; inspect files and start a new task.')
             name = target.relative_to(workspace.root).as_posix()
@@ -297,6 +299,17 @@ class TaskManager:
 
     def _verify(self, row, state, workspace):
         if not row['checks']:
+            docs = sorted(workspace.written)
+            if docs and all(n.lower().endswith('.docx') for n in docs) and not workspace.written - workspace.checked:
+                # Built-in check for Word output: each saved file must reopen as DOCX with text.
+                for n in docs:
+                    p = workspace.path(n)
+                    try:
+                        if not p.is_file() or not extract_text(p.name, p.read_bytes()).strip():
+                            return 'check', 'Word document is missing or has no text: ' + n
+                    except Exception:
+                        return 'check', 'Word document failed to open as DOCX: ' + n
+                return 'completed', 'Word document(s) reopened as DOCX with text present: ' + ', '.join(docs)
             return 'needs_input', 'Supply explicit file_text or exact_copy checks; no generic semantic verifier is available.'
         if workspace.written - workspace.checked:
             return 'check', 'Read these written files first: ' + ', '.join(sorted(workspace.written - workspace.checked))
@@ -305,6 +318,14 @@ class TaskManager:
             if not p.is_file() or p.stat().st_size > 32000:
                 return 'check', 'Expected artifact missing or oversized: ' + c['path']
             expected = c.get('text', '').encode('utf-8')
+            if c['type'] == 'file_text' and p.suffix.lower() == '.docx':
+                try:
+                    got = extract_text(p.name, p.read_bytes())
+                except Exception:
+                    return 'check', 'Artifact is not a valid DOCX: ' + c['path']
+                if c.get('text', '') not in got:
+                    return 'check', 'Artifact verification failed: ' + c['path']
+                continue
             if c['type'] == 'exact_copy':
                 s = workspace.path(c['source_path'])
                 if not s.is_file() or s.stat().st_size > 32000:
@@ -373,9 +394,14 @@ class TaskManager:
                     self.save(tid, 'running', state, {'type': 'retry', 'text': friendly_provider_error(exc).rstrip('.') + ', retrying %d of %d...' % (state['retry_streak'], MAX_RETRIES)})
                     self.stops[tid].wait(min(RETRY_DELAY * state['retry_streak'], 4))
                     continue
-                except (ValueError, TypeError, AttributeError):
-                    state['messages'].append({'role': 'user', 'content': 'Invalid action; return valid JSON. No tool executed.'})
-                    self.save(tid, 'running', state, {'type': 'error', 'text': 'Invalid action; retrying within step budget.'})
+                except (ValueError, TypeError, AttributeError) as exc:
+                    # An invalid reply is not a tool step: refund it, with a separate small cap.
+                    state['steps'] -= 1
+                    state['invalid'] = state.get('invalid', 0) + 1
+                    if state['invalid'] > MAX_INVALID:
+                        finish('blocked', 'The model returned %d invalid actions in this task. Try a stronger model or a simpler request, then press Resume.' % state['invalid']); return
+                    state['messages'].append({'role': 'user', 'content': 'Invalid action: ' + str(exc)[:500] + ' ' + INVALID_HELP})
+                    self.save(tid, 'running', state, {'type': 'error', 'text': 'Invalid action (%d of %d allowed); retrying without using a step.' % (state['invalid'], MAX_INVALID)})
                     continue
                 if self.stops[tid].is_set():
                     finish('stopped', 'Stopped before executing action.'); return
@@ -444,7 +470,10 @@ class TaskManager:
                 state['written'] = sorted(workspace.written)
                 state['checked'] = sorted(workspace.checked)
                 state['messages'].append({'role': 'user', 'content': 'UNTRUSTED TOOL RESULT: ' + output})
-                self.save(tid, 'running', state, {'type': 'tool', 'text': output[:4000], 'step': state['steps']})
+                extra = []
+                if kind == 'write_docx' and not failed:
+                    extra = [{'type': 'file', 'text': workspace.path(a['path']).relative_to(workspace.root).as_posix()}]
+                self.save(tid, 'running', state, {'type': 'tool', 'text': output[:4000], 'step': state['steps']}, extra)
             finish('budget_exhausted', 'Step budget exhausted; not complete.')
         except ToolError as exc:
             finish('blocked', str(exc))

@@ -399,6 +399,20 @@ function taskBubble(id, bubble) {
   }
   return view;
 }
+function noteFile(view, e) {
+  if (e.type === 'file' && typeof e.text === 'string') (view.files = view.files || new Set()).add(e.text);
+}
+function showFileChips(view) {
+  if (!view.files || !view.files.size || view.chipsShown === view.files.size) return;
+  view.chipsShown = view.files.size;
+  const bubble = add('grok', 'Files ready to download:\n');
+  for (const name of view.files) {
+    const link = document.createElement('a'); link.textContent = name; link.className = 'chip';
+    link.href = '/files/' + name.split('/').map(encodeURIComponent).join('/');
+    bubble.appendChild(link);
+  }
+  scrollChat();
+}
 function collapseLog(bubble) {
   if (!bubble.classList) return;
   bubble.classList.add('done');
@@ -422,7 +436,7 @@ async function watchTask(id, bubble) {
       const er = await fetch('/tasks/' + id + '/events?after=' + after);
       if (!er.ok) throw new Error('Could not load task events');
       const events = await er.json();
-      for (const e of events) { if (e.seq <= after) continue; after = view.after = e.seq; if (e.type === 'retry') retryText = e.text; else if (e.type !== 'progress') retryText = ''; if (e.type !== 'progress') bubble.textContent += '[' + e.type + '] ' + e.text + '\n'; }
+      for (const e of events) { if (e.seq <= after) continue; after = view.after = e.seq; noteFile(view, e); if (e.type === 'retry') retryText = e.text; else if (e.type !== 'progress') retryText = ''; if (e.type !== 'progress') bubble.textContent += '[' + e.type + '] ' + e.text + '\n'; }
       const sr = await fetch('/tasks/' + id); if (!sr.ok) throw new Error('Could not load task status');
       const row = await sr.json();
       document.getElementById('status').textContent = (row.status === 'running' && retryText) ? retryText : row.status + ' · step ' + row.steps;
@@ -436,12 +450,12 @@ async function watchTask(id, bubble) {
           const finalEvents = await finalRes.json();
           for (const e of finalEvents) {
             if (e.seq <= after) continue;
-            after = view.after = e.seq;
+            after = view.after = e.seq; noteFile(view, e);
             if (e.type !== 'progress') bubble.textContent += '[' + e.type + '] ' + e.text + '\n';
           }
           if (finalEvents.length < 200) break;
         }
-        collapseLog(bubble);
+        collapseLog(bubble); showFileChips(view);
         if (['blocked','interrupted','stopped'].includes(row.status)) addResumeButton(id, bubble);
         break;
       }

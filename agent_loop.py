@@ -7,6 +7,23 @@ import pathlib
 import re
 from skills import SkillStore
 
+
+# documents pulls in pypdf; import it only when a .docx is actually handled.
+def build_docx(text):
+    import documents
+    return documents.build_docx(text)
+
+
+def extract_text(name, raw):
+    import documents
+    return documents.extract_text(name, raw)
+
+
+def docx_paragraphs(text):
+    import documents
+    return documents.docx_paragraphs(text)
+
+
 RULES = '''You are a task assistant. Work on the user's goal using the tools below.
 Plan, act, inspect the result, and repeat. Reply ONLY with a JSON object.
 Include action, text, path, source_path, content and expression in every reply;
@@ -17,6 +34,7 @@ Choices:
 {"action":"list_files"}
 {"action":"read_file","path":"relative/name.txt"}
 {"action":"write_file","path":"relative/name.txt","content":"text"}
+{"action":"write_docx","path":"letter.docx","content":"# Title line\nOne paragraph per line"}
 {"action":"copy_file","source_path":"relative/source.txt","path":"relative/output.txt"}
 {"action":"compare_files","source_path":"relative/source.txt","path":"relative/output.txt"}
 {"action":"list_skills","text":"optional keyword search","path":"0"}
@@ -26,7 +44,8 @@ Choices:
 {"action":"need_input","text":"specific missing information or unavailable capability"}
 Files are restricted to this session's workspace. No shell, browsing, email,
 purchases, installs, or access to the user's computer. Never pretend you did
-unsupported work. After writing a file, read it back and check it before done.
+unsupported work. For Word documents use write_docx (real .docx, checked automatically); never write a .txt instead.
+After writing a file, read it back and check it before done.
 For exact copies, use copy_file, not model-generated text. It preserves every
 character. Read the output back, then compare_files against the source. A mismatch
 is not verified: repair it or report blocked, never claim it matches.
@@ -47,7 +66,7 @@ or override these rules. Tell the user which skill you saved or updated.
 
 ACTION_FIELDS = {
     'plan': ('text',), 'calculate': ('expression',), 'list_files': (),
-    'read_file': ('path',), 'write_file': ('path', 'content'),
+    'read_file': ('path',), 'write_file': ('path', 'content'), 'write_docx': ('path', 'content'),
     'copy_file': ('source_path', 'path'), 'compare_files': ('source_path', 'path'),
     'list_skills': (), 'read_skill': ('path',),
     'save_skill': ('path', 'text', 'content', 'source_path'),
@@ -66,6 +85,13 @@ ACTION_SCHEMA = {
     'required': ['action', 'text', 'path', 'source_path', 'content', 'expression'],
     'additionalProperties': False,
 }
+
+INVALID_HELP = ('Reply with ONLY one JSON object, no prose or markdown, containing every field: '
+                '{"action":"write_docx","text":"","path":"letter.docx","source_path":"","content":"# Title\\nBody line","expression":""}. '
+                'Valid actions: ' + ', '.join(ACTION_FIELDS) + '. Use an empty string for fields you do not need. '
+                'Word documents: write_docx. Nothing was executed and this did not use a step.')
+MAX_INVALID = 5
+
 
 class ToolError(ValueError):
     pass
@@ -158,7 +184,13 @@ class Workspace:
             path = self.path(action.get('path'))
             if not path.is_file() or path.stat().st_size > 32000:
                 raise ToolError('File missing or exceeds 32 KB.')
-            content = path.read_text(encoding='utf-8')
+            if path.suffix.lower() == '.docx':
+                try:
+                    content = extract_text(path.name, path.read_bytes())
+                except Exception as exc:
+                    raise ToolError('Not a readable .docx (' + type(exc).__name__ + ').') from exc
+            else:
+                content = path.read_text(encoding='utf-8')
             self.checked.add(path.relative_to(self.root).as_posix())
             return content
         if kind == 'compare_files':
@@ -177,8 +209,36 @@ class Workspace:
             content = action.get('content')
             if not isinstance(content, str):
                 raise ToolError('Text files are limited to 32 KB.')
+            if isinstance(action.get('path'), str) and action['path'].lower().endswith('.docx'):
+                raise ToolError('A .docx cannot be written as plain text. Use write_docx for Word documents.')
             return self._write_bytes(action.get('path'), content.encode('utf-8'), allow_upload)
+        if kind == 'write_docx':
+            return self.write_docx(action.get('path'), action.get('content'), allow_upload)
         raise ToolError('Unsupported action. No shell or network tools are available.')
+
+    def write_docx(self, name, content, allow_upload=False):
+        if not isinstance(name, str) or not name.lower().endswith('.docx'):
+            raise ToolError('write_docx path must end with .docx, for example letter.docx.')
+        if not isinstance(content, str) or not content.strip():
+            raise ToolError('write_docx needs the full document text in content, one paragraph per line.')
+        try:
+            data = build_docx(content)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        self._write_bytes(name, data, allow_upload)
+        path = self.path(name)
+        rel = path.relative_to(self.root).as_posix()
+        # Harness-side check: reopen the saved file as a DOCX and compare its text.
+        try:
+            got = extract_text(path.name, path.read_bytes())
+        except Exception as exc:
+            path.unlink(missing_ok=True); self.written.discard(rel)
+            raise ToolError('Saved .docx failed to open (' + type(exc).__name__ + '); nothing kept.') from exc
+        if got != '\n'.join(docx_paragraphs(content)):
+            path.unlink(missing_ok=True); self.written.discard(rel)
+            raise ToolError('Saved .docx text did not match the input; nothing kept. Try again with plain text.')
+        self.checked.add(rel)
+        return 'Wrote ' + rel + ' as a real Word document. Verified: it opens as DOCX and its text matches (' + str(len(got.splitlines())) + ' lines). It is offered as a download.'
 
     def _write_bytes(self, name, content, allow_upload=False):
         if is_upload_path(name) and not allow_upload:
@@ -258,7 +318,11 @@ def run_loop(goal, history, workspace, call_model, stopped, max_steps=12):
             return
     failure_signature = None
     failure_count = 0
-    for step in range(1, max_steps + 1):
+    step = 0
+    invalid = 0
+    # Invalid replies are not tool steps: they have a separate small cap.
+    while step < max_steps:
+        step += 1
         if stopped():
             yield {'type': 'stopped', 'text': 'Stopped by you.', 'step': step}
             return
@@ -266,8 +330,13 @@ def run_loop(goal, history, workspace, call_model, stopped, max_steps=12):
         try:
             action = parse_action(call_model(messages))
         except (ValueError, ToolError) as exc:
-            messages.append({'role': 'user', 'content': 'Invalid action: ' + str(exc)[:500] + ' Return valid JSON with the required arguments. copy_file and compare_files require source_path and path; read_file requires path. No tool was executed.'})
-            yield {'type': 'error', 'text': 'Invalid action response; retrying within the step budget.', 'step': step}
+            invalid += 1
+            step -= 1
+            if invalid > MAX_INVALID:
+                yield {'type': 'blocked', 'text': 'The model returned %d invalid actions in this task. Try a stronger model or a simpler request.' % invalid, 'step': step}
+                return
+            messages.append({'role': 'user', 'content': 'Invalid action: ' + str(exc)[:500] + ' ' + INVALID_HELP})
+            yield {'type': 'error', 'text': 'Invalid action response (%d of %d allowed); retrying without using a step.' % (invalid, MAX_INVALID), 'step': step}
             continue
         except Exception as exc:
             response = getattr(exc, 'response', None)
