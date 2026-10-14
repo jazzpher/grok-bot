@@ -17,8 +17,7 @@ import hashlib
 import inspect
 from urllib.parse import urlparse
 
-from agent_loop import RULES, ACTION_FIELDS, Workspace, ToolError, is_upload_path, parse_action, INVALID_HELP, MAX_INVALID
-from documents import build_docx, extract_text
+from agent_loop import RULES, ACTION_FIELDS, Workspace, ToolError, is_upload_path, parse_action, INVALID_HELP, MAX_INVALID, build_docx, extract_text
 
 ACTIVE = ('queued', 'running')
 RESUMABLE = ('stopped', 'interrupted', 'needs_input', 'blocked')
