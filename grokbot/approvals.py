@@ -157,13 +157,14 @@ class ApprovalBroker:
             if pattern_matches(pattern, tool, arguments):
                 ctx.emit({'type': 'approval', 'tool': tool, 'decision': 'deny', 'reason': 'Denied by your policy deny list.'})
                 return 'deny'
-        for pattern in policy.allow:
+        strict = bool(tool == 'run_command' and (getattr(ctx, 'extras', None) or {}).get('strict_approval'))
+        for pattern in ([] if strict else policy.allow):
             if pattern_matches(pattern, tool, arguments):
                 ctx.emit({'type': 'approval', 'tool': tool, 'decision': 'allow', 'reason': 'Allowed by your saved rule: ' + pattern})
                 return 'allow'
         if policy.approval == 'never':
             ctx.emit({'type': 'approval', 'tool': tool, 'decision': 'deny',
-                      'reason': 'Approval policy is "never": ' + reason + ' Switch to on-request or add an allow rule.'})
+                      'reason': 'Approval policy is "never": ' + reason + (' Switch to on-request to approve commands one by one.' if strict else ' Switch to on-request or add an allow rule.')})
             return 'deny'
         pending = PendingApproval(secrets.token_hex(8), ctx.session_id, ctx.turn_id, tool, arguments, reason, time.time())
         with self.lock:
@@ -185,6 +186,8 @@ class ApprovalBroker:
             with self.lock:
                 self.pending.pop(pending.id, None)
         decision = pending.decision or 'deny'
+        if decision == 'always' and strict:
+            decision = 'allow'   # no saved rules for host commands without an isolated sandbox: this one time only
         if decision == 'always':
             pattern = allow_pattern(tool, arguments)
             if pattern not in policy.allow:
