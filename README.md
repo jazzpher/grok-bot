@@ -30,6 +30,22 @@ key never returns to the browser) and a Test button that sends one tiny request
 and reports OK, or a plain 401 (wrong key), 404 (no such model), 429 (quota) or
 503 (provider busy) message. Test uses a small amount of your free quota.
 
+Model discovery: Settings lists models on provider/key changes (debounced) or with
+**Refresh models**. The picker never chooses the first result or replaces a typed
+or current model. Choose explicitly, then Save. Manual model entry remains available
+when listing fails. A listed model is **not** proof of chat support, free quota, or
+account access; Test still sends one small chat request. Hints remain defaults when
+no model has been entered, not verified availability claims.
+
+Catalog requests use explicit provider endpoints, no redirects, bounded pagination
+(same origin and catalog path only), size/time/model limits and a five-minute,
+memory-only cache scoped to the endpoint/provider and a keyed credential digest.
+Refresh bypasses the cache; saving settings clears it. Provider errors are sanitized.
+NVIDIA hosted listing is best-effort and has not been verified with a real key.
+Custom providers (including Token Harbor) require an **explicit models URL** on the
+same origin as their chat URL. No catalog path is guessed; without one, type a model.
+Custom DNS checks remain best-effort against hostile rebinding, as described below.
+
 A Custom URL (advanced) choice exists for other OpenAI-compatible endpoints. It
 only accepts public https addresses: http, userinfo, and private, loopback or
 link-local addresses (literal or resolved) are rejected, because the key is POSTed
