@@ -76,9 +76,12 @@ def environment_block(ctx: ToolContext, registry: ToolRegistry, policy: SandboxP
     return '\n'.join(lines)
 
 
+PROJECT_INSTRUCTION_FILES = ('AGENTS.md', 'GROKBOT.md', 'CLAUDE.md')
+
+
 def project_instructions(workspace):
     """AGENTS.md (Codex/Claude convention) from the workspace root, bounded."""
-    for name in ('AGENTS.md', 'GROKBOT.md', 'CLAUDE.md'):
+    for name in PROJECT_INSTRUCTION_FILES:
         try:
             path = workspace.path(name)
         except Exception:  # noqa: BLE001
@@ -92,6 +95,49 @@ def project_instructions(workspace):
     return ''
 
 
+def memory_block(ctx, goal):
+    """Relevant long-term memories for this owner (when the host attached a MemoryStore)."""
+    store = ctx.extras.get('memory')
+    if store is None:
+        return '', []
+    try:
+        owner = ctx.extras.get('owner') or ctx.session_id
+        rows = store.relevant(owner, goal)
+        return store.prompt_block(rows), rows
+    except Exception:  # noqa: BLE001
+        return '', []
+
+
+def context_info(ctx, registry, goal):
+    """What the agent can see this turn (shown in the UI as a collapsible 'context' row)."""
+    workspace = ctx.workspace
+    info = {'type': 'context_info', 'memories': [], 'skills': [], 'project_file': '', 'uploads': [], 'tools': 0, 'mcp': []}
+    _, rows = memory_block(ctx, goal)
+    info['memories'] = [{'id': m['id'], 'text': m['text'][:200], 'pinned': bool(m.get('pinned'))} for m in rows]
+    try:
+        info['skills'] = [r['name'] for r in workspace.skills._ranked(goal)[:8]]
+    except Exception:  # noqa: BLE001
+        pass
+    for name in PROJECT_INSTRUCTION_FILES:
+        try:
+            if workspace.path(name).is_file():
+                info['project_file'] = name
+                break
+        except Exception:  # noqa: BLE001
+            continue
+    try:
+        info['uploads'] = sorted(ctx.extras.get('uploads') or [])[:20]
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        names = registry.names_for(ctx)
+        info['tools'] = len(names)
+        info['mcp'] = sorted({n.split('__')[1] for n in names if n.startswith('mcp__') and n.count('__') >= 2})
+    except Exception:  # noqa: BLE001
+        pass
+    return info
+
+
 def build_system_prompt(ctx, registry, policy, goal='', model_label='', extra='', json_mode=False):
     workspace = ctx.workspace
     parts = [SYSTEM_PROMPT, environment_block(ctx, registry, policy, model_label)]
@@ -102,6 +148,9 @@ def build_system_prompt(ctx, registry, policy, goal='', model_label='', extra=''
     if skills:
         parts.append(skills)
     parts.append(project_instructions(workspace).strip())
+    memories, _ = memory_block(ctx, goal)
+    if memories:
+        parts.append(memories)
     if extra:
         parts.append(extra)
     if json_mode:
@@ -168,8 +217,23 @@ def run_turn(messages: List[dict], registry: ToolRegistry, ctx: ToolContext, cfg
         ctx.turn_id = secrets.token_hex(6)
     original_emit = ctx.emit
     ctx.emit = emit
+    ctx.extras.setdefault('depth', 0)
+    ctx.extras.update({'registry': registry, 'cfg': cfg, 'stream_fn': stream_fn, 'summarizer': summarizer,
+                       'context_tokens': context_tokens, 'model_label': model_label})
     convo = list(messages)
-    goal = next((m.get('content') for m in reversed(convo) if m.get('role') == 'user' and isinstance(m.get('content'), str)), '')
+    goal = ''
+    for m in reversed(convo):
+        if m.get('role') != 'user':
+            continue
+        content = m.get('content')
+        if isinstance(content, str):
+            goal = content
+        elif isinstance(content, list):
+            goal = ' '.join(p.get('text', '') for p in content if isinstance(p, dict) and p.get('type') == 'text')
+        break
+    if ctx.extras.get('depth', 0) == 0 and not ctx.extras.get('quiet'):
+        send_info = context_info(ctx, registry, goal)
+        emit(send_info)
     json_mode = tool_mode == 'json' or ctx.extras.get('json_mode') is True
     usage_total = {'prompt_tokens': 0, 'completion_tokens': 0}
     steps = tool_count = 0
@@ -290,8 +354,14 @@ def run_turn(messages: List[dict], registry: ToolRegistry, ctx: ToolContext, cfg
                 break
     finally:
         ctx.emit = original_emit
+    result = TurnResult(status, final_text, convo, steps, tool_count, usage_total, summary)
+    try:
+        from grokbot import plugins
+        plugins.run_turn_end(ctx, result)
+    except Exception:  # noqa: BLE001
+        pass
     send({'type': 'done', 'status': status, 'steps': steps, 'tool_calls': tool_count, 'usage': usage_total})
-    return TurnResult(status, final_text, convo, steps, tool_count, usage_total, summary)
+    return result
 
 
 def _execute_calls(registry, ctx, calls, send):
@@ -309,7 +379,11 @@ def _execute_calls(registry, ctx, calls, send):
         return result
 
     results = [None] * len(calls)
-    parallel = [i for i, c in enumerate(calls) if c['name'] in READ_ONLY_TOOLS]
+
+    def parallel_ok(name):
+        spec = registry.get(name)
+        return name in READ_ONLY_TOOLS or bool(spec is not None and spec.parallel_safe)
+    parallel = [i for i, c in enumerate(calls) if parallel_ok(c['name'])]
     serial = [i for i in range(len(calls)) if i not in parallel]
     if len(parallel) > 1:
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(config.MAX_PARALLEL_TOOLS, len(parallel))) as pool:

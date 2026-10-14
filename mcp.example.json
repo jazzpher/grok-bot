@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data"],
+      "env": {}
+    },
+    "remote-example": {
+      "url": "https://mcp.example.com/mcp",
+      "headers": {"Authorization": "Bearer REPLACE_ME"},
+      "disabled": true
+    }
+  }
+}

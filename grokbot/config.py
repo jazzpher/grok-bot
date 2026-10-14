@@ -31,6 +31,21 @@ MAX_READ_BYTES = _int('GROK_MAX_READ_BYTES', 2 * 1024 * 1024, 1024)
 MAX_STEPS = _int('GROK_MAX_STEPS', 50, 1)
 MAX_TOOL_OUTPUT_CHARS = _int('GROK_MAX_TOOL_OUTPUT', 20000, 500)
 MAX_PARALLEL_TOOLS = _int('GROK_MAX_PARALLEL_TOOLS', 8, 1)
+MAX_SUBAGENT_DEPTH = _int('GROK_MAX_SUBAGENT_DEPTH', 1, 0)
+
+# MCP (Model Context Protocol) client: config file with {"mcpServers": {...}} (Codex/Claude layout)
+MCP_CONFIG = os.environ.get('GROK_MCP_CONFIG', '')            # default: ./mcp.json next to webui.py if present
+MCP_CONNECT_TIMEOUT = _int('GROK_MCP_CONNECT_TIMEOUT', 20, 1)
+MCP_CALL_TIMEOUT = _int('GROK_MCP_CALL_TIMEOUT', 90, 1)
+
+# Scheduler
+SCHEDULER_TICK = _int('GROK_SCHEDULER_TICK', 30, 5)
+SCHEDULER_MAX_JOBS = _int('GROK_SCHEDULER_MAX_JOBS', 100, 1)
+SCHEDULED_MAX_STEPS = _int('GROK_SCHEDULED_MAX_STEPS', 25, 1)
+
+# Telegram gateway (fail closed: no allowlist, no bot)
+TELEGRAM_TOKEN = os.environ.get('GROK_TELEGRAM_TOKEN', '')
+TELEGRAM_ALLOWED_IDS = {x.strip() for x in os.environ.get('GROK_TELEGRAM_ALLOWED_IDS', '').split(',') if x.strip()}
 DEFAULT_CONTEXT_TOKENS = _int('GROK_CONTEXT_TOKENS', 128000, 4000)
 COMPACT_RATIO = 0.70          # summarize when estimated tokens exceed this share of the window
 KEEP_RECENT_MESSAGES = 8      # always keep the newest messages verbatim after compaction

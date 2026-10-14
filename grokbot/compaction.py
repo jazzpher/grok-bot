@@ -29,7 +29,11 @@ def estimate_tokens(messages):
         if isinstance(content, str):
             total += len(content) / 3.6
         elif isinstance(content, list):
-            total += sum(len(json.dumps(p)) for p in content) / 3.6
+            for part in content:
+                if isinstance(part, dict) and part.get('type') == 'image_url':
+                    total += 1100      # provider-side image tokens, not the base64 length
+                else:
+                    total += len(json.dumps(part)) / 3.6
         if m.get('tool_calls'):
             total += len(json.dumps(m['tool_calls'])) / 3.6
     return int(total)

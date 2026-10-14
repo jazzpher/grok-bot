@@ -1,4 +1,4 @@
-# Architecture (grokbot 0.2)
+# Architecture (grokbot 0.9)
 
 ```
 browser ──POST /agent (NDJSON)──▶ webui.py ──▶ grokbot.agent.run_turn ──▶ grokbot.providers.stream_chat ──▶ provider
@@ -61,3 +61,43 @@ exposes it; `/set_key` accepts `context_length`; `/key_status` reports it.
 ## CLI (`grokbot/cli.py`)
 `python -m grokbot chat|exec|serve`. `exec` is non-interactive (exit code 1 unless the turn completed; `--json`
 prints a result object) for CI. `--mock` runs the whole loop offline.
+
+## Added in 0.9 (phases 3–5)
+
+```
+webui.run_owner_turn(owner, workspace, cid, text, emit=…, stop=…, images=…, unattended=…)
+        ▲                 ▲                    ▲
+   POST /agent      Scheduler.run_job     TelegramGateway (owner tg:<chat>)
+```
+
+- **`grokbot/memory.py`** — `MemoryStore` (SQLite + FTS5, owner-scoped). `relevant(owner, goal)` = pinned first, then
+  best keyword matches, bounded; `agent.build_system_prompt` appends `prompt_block(...)` when the host attaches the
+  store in `ctx.extras['memory']`. Tools in `grokbot/tools/memory.py` (`save_memory`, `search_memory`, `forget_memory`,
+  `search_history`, `read_history`). The `context_info` event tells the UI what was injected (memories, skill index,
+  project file, uploads, MCP servers, tool count).
+- **`grokbot/tools/delegate.py`** — sub-agents: a nested `run_turn` with a `registry.subset(...)` (no memory writes,
+  no further delegation past `MAX_SUBAGENT_DEPTH`), fresh context, same workspace/policy/approvals. Nested events carry
+  `agent`/`depth`; the nested `done` is renamed `subagent_done`; `subagent_start`/`subagent_end` wrap them.
+- **`grokbot/scheduler.py`** — `parse_schedule()` (cron / phrases) → spec `{kind: cron|interval|once}`; `Scheduler`
+  stores jobs in SQLite, a tick thread runs due jobs through the host `runner(job)`; `once` jobs disable themselves.
+  The host runner (`webui.run_scheduled_job`) creates a ⏰ conversation, runs an unattended turn
+  (`approval=never`, `SCHEDULED_MAX_STEPS`) and queues a notification (`GET /notifications`) and, if the job was
+  created from Telegram, sends the result there. Tools: `schedule_task`, `list_scheduled_tasks`, `cancel_scheduled_task`.
+- **`grokbot/mcp.py`** — JSON-RPC client for stdio (`StdioClient`, reader thread, id-matched replies) and Streamable
+  HTTP (`HttpClient`, JSON or SSE responses, `Mcp-Session-Id`). `MCPManager.register_tools(registry)` turns every
+  remote tool into a `ToolSpec` named `mcp__<server>__<tool>` (sanitised, ≤64 chars) with the server's input schema;
+  `mutates = not readOnlyHint`, approval required in read-only mode or when `destructiveHint` is set; failures
+  disconnect so the next call reconnects.
+- **`grokbot/plugins.py`** — `GROK_PLUGINS` modules may `register(registry)` tools and hook `before_tool` /
+  `after_tool` / `on_turn_end` / `on_message`; `ToolRegistry.execute` and `run_turn` call them; a failing hook is
+  logged and skipped.
+- **`grokbot/gateway/telegram.py`** — `TelegramGateway(token, allowed_ids, runner, approvals, policy_store)`:
+  `getUpdates` long polling, strict allowlist, draft message edited every ~2 s while streaming, approvals as inline
+  buttons (`ap|<id>|allow|always|deny` → `ApprovalBroker.resolve`), commands `/new /stop /policy /status /help`.
+  `TelegramRunner` in `webui.py` maps a chat to its current conversation and calls `run_owner_turn`.
+- **Web routes** — `/memories…`, `/schedules…`, `/notifications`, `/mcp`, `/mcp/reload`, `/skills/export`,
+  `/skills/import`, `/conversations/<id>/export?format=md|json`, `/c/<id>` (deep link), `/capabilities` (now
+  includes memory/schedule counts, MCP status, plugins, telegram, local provider). `/agent` accepts
+  `images: [{name, data_url}]` (≤4, PNG/JPEG/WebP/GIF, ~2 MB each) which become `image_url` parts.
+- **UI** — Memory and Automations panels, Context row, sub-agent cards, attachments (drag-drop/paste), quick model
+  switch in the top bar, export button, theme toggle, PWA manifest, Web Speech dictation, notifications toast.

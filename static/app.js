@@ -123,9 +123,71 @@ function renderEntry(entry) {
     else if (ev.type === 'approval') note('Approval: ' + ev.tool + ' → ' + ev.decision + (ev.reason ? ' (' + ev.reason + ')' : ''));
     else if (ev.type === 'compaction') note('Context compacted (' + ev.method + '): ' + ev.before_tokens + ' → ' + ev.after_tokens + ' tokens');
     else if (ev.type === 'error') note(ev.text, 'err');
+    else if (ev.type === 'subagent_start') subagentCard(ev);
+    else if (ev.type === 'subagent_end') finishSubagent(ev);
+    else if (ev.type === 'memory_saved') note('Memory saved: ' + ev.text, 'mem');
+    else if (ev.type === 'schedule_created') note('Scheduled: ' + ev.title + ' · ' + ev.when, 'mem');
   }
   const bubble = add('grok', '');
   renderMarkdown(bubble, entry.content || '');
+}
+
+/* ---------------- context info, sub-agents ---------------- */
+function contextInfoRow(ev) {
+  const box = el('details', 'ctxinfo');
+  const sum = el('summary');
+  const bits = [];
+  if ((ev.memories || []).length) bits.push(ev.memories.length + ' memor' + (ev.memories.length === 1 ? 'y' : 'ies'));
+  if ((ev.skills || []).length) bits.push(ev.skills.length + ' skill' + (ev.skills.length === 1 ? '' : 's'));
+  if (ev.project_file) bits.push(ev.project_file);
+  if ((ev.uploads || []).length) bits.push(ev.uploads.length + ' upload' + (ev.uploads.length === 1 ? '' : 's'));
+  if ((ev.mcp || []).length) bits.push('MCP: ' + ev.mcp.join(', '));
+  bits.push((ev.tools || 0) + ' tools');
+  sum.textContent = 'Context: ' + bits.join(' · ');
+  box.appendChild(sum);
+  const body = el('div', 'ctxbody');
+  for (const m of ev.memories || []) body.appendChild(el('div', 'ctxitem', (m.pinned ? '📌 ' : '• ') + m.text));
+  if ((ev.skills || []).length) body.appendChild(el('div', 'ctxitem', 'Skills in index: ' + ev.skills.join(', ')));
+  if (ev.project_file) body.appendChild(el('div', 'ctxitem', 'Project instructions: ' + ev.project_file));
+  if ((ev.uploads || []).length) body.appendChild(el('div', 'ctxitem', 'Uploads: ' + ev.uploads.join(', ')));
+  box.appendChild(body);
+  chat.appendChild(box); scrollChat();
+  return box;
+}
+const subagents = new Map();
+function subagentCard(ev) {
+  const card = el('details', 'subagent running');
+  card.open = true;
+  const sum = el('summary');
+  sum.appendChild(el('b', '', (ev.agent || 'sub-agent') + (ev.depth > 1 ? ' (depth ' + ev.depth + ')' : '')));
+  sum.appendChild(el('code', '', (ev.task || '').slice(0, 120)));
+  const meta = el('span', 'tmeta', 'working'); sum.appendChild(meta);
+  card.appendChild(sum);
+  const body = el('div', 'subbody'); card.appendChild(body);
+  card._meta = meta; card._body = body; card._text = ''; card._bubble = null;
+  chat.appendChild(card); scrollChat();
+  if (ev.agent) subagents.set(ev.agent, card);
+  return card;
+}
+function finishSubagent(ev) {
+  const card = subagents.get(ev.agent); if (!card) return;
+  card.className = 'subagent ' + (ev.status === 'completed' ? 'ok' : 'err');
+  if (card._meta) card._meta.textContent = (ev.status || '') + ' · ' + (ev.steps || 0) + ' steps · ' + (ev.tool_calls || 0) + ' tools';
+  card.open = false;
+  subagents.delete(ev.agent);
+}
+function subagentEvent(ev) {
+  const card = subagents.get(ev.agent); if (!card) return false;
+  const host = card._body;
+  if (ev.type === 'text') {
+    if (!card._bubble) { card._bubble = el('div', 'subtext', ''); host.appendChild(card._bubble); }
+    card._text += ev.delta; card._bubble.textContent = card._text;
+  } else if (ev.type === 'tool_start') {
+    host.appendChild(toolCard(ev));
+  } else if (ev.type === 'tool_end') finishToolCard(ev);
+  else if (ev.type === 'approval_required') approvalCard(ev);
+  else if (ev.type === 'subagent_done') { /* summarised by subagent_end */ }
+  return true;
 }
 
 /* ---------------- conversations ---------------- */
@@ -159,12 +221,21 @@ async function openConversation(id) {
   try {
     const res = await fetch('/conversations/' + id + '/select', {method: 'POST'}); if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
-    currentConversation = data.id; setCrumb(data.title);
+    currentConversation = data.id; setCrumb(data.title); setUrl(data.id);
     chat.replaceChildren(); toolCards.clear();
     for (const entry of data.entries || []) renderEntry(entry);
     if (!(data.entries || []).length) chat.appendChild(el('div', 'hint', 'Empty conversation.'));
     scrollChat(); loadConversations(); closeSidebar();
   } catch (e) { document.getElementById('status').textContent = 'Could not open conversation: ' + e.message; }
+}
+function setUrl(id) {
+  try { if (hasDOM && window.history && window.history.replaceState) window.history.replaceState({cid: id}, '', id ? '/c/' + id : '/'); } catch (_) { /* sandboxed */ }
+}
+function exportConversation(fmt) {
+  if (!currentConversation) { document.getElementById('status').textContent = 'Nothing to export yet.'; return; }
+  const f = (typeof event !== 'undefined' && event && event.shiftKey) ? 'json' : (fmt || 'md');
+  const a = document.createElement('a'); a.href = '/conversations/' + currentConversation + '/export?format=' + f; a.download = '';
+  document.body.appendChild(a); a.click(); a.remove();
 }
 async function newConversation() {
   if (turnRunning) { document.getElementById('status').textContent = 'Wait for the current reply to finish.'; return; }
@@ -172,7 +243,7 @@ async function newConversation() {
     const res = await fetch('/conversations', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
-    currentConversation = data.id; setCrumb('New chat');
+    currentConversation = data.id; setCrumb('New chat'); setUrl(data.id);
     chat.replaceChildren(); chat.appendChild(el('div', 'hint', 'New chat. Workspace files and skills are kept.'));
     toolCards.clear(); loadConversations(); closeSidebar(); if (inp && inp.focus) inp.focus();
   } catch (e) { document.getElementById('status').textContent = e.message; }
@@ -202,7 +273,7 @@ async function restoreHistory() {
     const res = await fetch('/conversations/current'); if (!res.ok) return;
     const data = await res.json();
     if (!data || !data.id) return;
-    currentConversation = data.id; setCrumb(data.title);
+    currentConversation = data.id; setCrumb(data.title); setUrl(data.id);
     if (Array.isArray(data.entries) && data.entries.length) { chat.replaceChildren(); for (const entry of data.entries) renderEntry(entry); }
     if (data.running) { note('A reply is still running in the background; reconnecting…'); attachCurrentTurn(); }
     loadConversations();
@@ -224,8 +295,13 @@ function slashCommand(text) {
   if (cmd === 'settings') { toggleSettings(); return true; }
   if (cmd === 'model') { if (arg) setModel(arg); else toggleSettings(); return true; }
   if (cmd === 'policy') { const [mode, approval] = arg.split(/\s+/); quickPolicy(mode, approval); return true; }
+  if (cmd === 'memory' || cmd === 'memories') { toggleMemory(); return true; }
+  if (cmd === 'remember' && arg) { addMemory(arg); return true; }
+  if (cmd === 'schedule' || cmd === 'schedules' || cmd === 'automations') { toggleSchedules(); return true; }
+  if (cmd === 'export') { exportConversation(arg === 'json' ? 'json' : 'md'); return true; }
+  if (cmd === 'theme') { toggleTheme(arg); return true; }
   if (cmd === 'help') {
-    add('grok', '').textContent = 'Commands: /new · /compact · /model <name> · /policy <read-only|workspace-write|full-access> [on-request|never] · /skills · /files · /settings · /help';
+    add('grok', '').textContent = 'Commands: /new · /compact · /model <name> · /policy <read-only|workspace-write|full-access> [on-request|never] · /memory · /remember <fact> · /schedules · /skills · /files · /export [json] · /theme · /settings · /help';
     return true;
   }
   return false;
@@ -235,7 +311,10 @@ async function send() {
   if (!text || sendBtn.disabled) return;
   if (text.startsWith('/') && slashCommand(text)) { inp.value = ''; return; }
   const background = !!(document.getElementById('background') && document.getElementById('background').checked);
-  add('you', text); inp.value = ''; if (inp.style) inp.style.height = 'auto';
+  const images = attachments.splice(0, attachments.length); renderAttachments();
+  const you = add('you', text);
+  for (const img of images) { const im = document.createElement('img'); im.src = img.data_url; im.alt = img.name; im.className = 'thumb'; if (you.appendChild) you.appendChild(im); }
+  inp.value = ''; if (inp.style) inp.style.height = 'auto';
   const status = document.getElementById('status');
   if (background) return sendBackgroundTask(text);
   setRunning(true);
@@ -248,11 +327,17 @@ async function send() {
   const lastChild = () => chat.children[chat.children.length - 1];
   try {
     const res = await fetch('/agent', {method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text, conversation_id: currentConversation || undefined})});
+      body: JSON.stringify({message: text, conversation_id: currentConversation || undefined, images: images.length ? images : undefined})});
     if (!res.ok) throw new Error(await res.text());
     await consumeEventStream(res, ev => {
+      if (ev.agent && ev.type !== 'subagent_start' && ev.type !== 'subagent_end' && subagentEvent(ev)) return;
       switch (ev.type) {
-        case 'conversation': currentConversation = ev.id; if (ev.title) setCrumb(ev.title); break;
+        case 'conversation': currentConversation = ev.id; if (ev.title) setCrumb(ev.title); setUrl(ev.id); break;
+        case 'context_info': contextInfoRow(ev); break;
+        case 'subagent_start': if (current) finalizeBubble(); subagentCard(ev); status.textContent = 'Sub-agent ' + ev.agent; break;
+        case 'subagent_end': finishSubagent(ev); break;
+        case 'memory_saved': note('Memory saved: ' + ev.text, 'mem'); refreshMemoryCount(); break;
+        case 'schedule_created': note('Scheduled: ' + ev.title + ' · ' + ev.when, 'mem'); refreshScheduleCount(); break;
         case 'text':
           if (current && lastChild() !== bubble) { finalizeBubble(); bubble = add('grok pending', ''); current = ''; }
           current += ev.delta; anyText = true; paint(); status.textContent = 'Replying'; break;
@@ -527,8 +612,8 @@ async function refreshSkills() {
   } catch (e) { document.getElementById('skillstatus').textContent = e.message; }
 }
 async function toggleSkills() {
-  const panel = document.getElementById('skillsPanel'); panel.hidden = !panel.hidden;
-  if (!panel.hidden) await refreshSkills();
+  const panel = document.getElementById('skillsPanel'); const open = panel.hidden; showPanel('skillsPanel', open);
+  if (open) await refreshSkills();
   closeSidebar();
 }
 async function loadSkill() {
@@ -668,6 +753,7 @@ async function refreshModels(force = true) {
   }
 }
 async function toggleSettings() {
+  loadCapabilities();
   const open = document.getElementById('settings').classList.toggle('open');
   if (open) { await refreshKeyStatus(); loadProviders(); loadPolicy(); }
   closeSidebar();
@@ -764,10 +850,262 @@ inp.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
   if (e.key === 'Escape' && turnRunning) { stopTask(); }
 });
+/* ---------------- attachments (images), drag-drop, paste ---------------- */
+const attachments = [];
+function renderAttachments() {
+  const box = document.getElementById('attachments'); if (!box || typeof box.replaceChildren !== 'function') return;
+  box.replaceChildren();
+  box.hidden = attachments.length === 0;
+  attachments.forEach((img, i) => {
+    const chip = el('span', 'chip');
+    const im = document.createElement('img'); im.src = img.data_url; im.alt = img.name; chip.appendChild(im);
+    chip.appendChild(el('span', '', img.name));
+    const x = el('button', 'x', '×'); x.title = 'Remove'; x.addEventListener('click', () => { attachments.splice(i, 1); renderAttachments(); });
+    chip.appendChild(x); box.appendChild(chip);
+  });
+}
+function attachImages(files) {
+  const status = document.getElementById('status');
+  for (const file of Array.from(files || [])) {
+    if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) { status.textContent = 'Only PNG, JPEG, WebP or GIF images can be attached.'; continue; }
+    if (file.size > 2 * 1024 * 1024) { status.textContent = file.name + ' is over 2 MB.'; continue; }
+    if (attachments.length >= 4) { status.textContent = 'At most 4 images per message.'; break; }
+    const reader = new FileReader();
+    reader.onload = () => { attachments.push({name: file.name, data_url: String(reader.result)}); renderAttachments(); };
+    reader.readAsDataURL(file);
+  }
+}
+function handleDroppedFiles(files) {
+  const images = [], docs = [];
+  for (const f of Array.from(files || [])) (f.type && f.type.startsWith('image/') ? images : docs).push(f);
+  if (images.length) attachImages(images);
+  for (const f of docs) uploadFile({files: [f], value: ''});
+}
+if (hasDOM) {
+  const composer = document.getElementById('composer');
+  if (composer) {
+    ['dragenter', 'dragover'].forEach(t => composer.addEventListener(t, e => { e.preventDefault(); composer.classList.add('drop'); }));
+    ['dragleave', 'drop'].forEach(t => composer.addEventListener(t, e => { e.preventDefault(); composer.classList.remove('drop'); }));
+    composer.addEventListener('drop', e => { if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) handleDroppedFiles(e.dataTransfer.files); });
+  }
+  inp.addEventListener('paste', e => {
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    const files = []; for (const it of items) if (it.kind === 'file' && it.type.startsWith('image/')) files.push(it.getAsFile());
+    if (files.length) { e.preventDefault(); attachImages(files); }
+  });
+}
+
+/* ---------------- memory panel ---------------- */
+function showPanel(id, on) {
+  for (const pid of ['memoryPanel', 'schedulePanel', 'skillsPanel']) { const p = document.getElementById(pid); if (p) p.hidden = pid === id ? !on : true; }
+}
+async function refreshMemoryCount() {
+  try { const res = await fetch('/memories'); if (!res.ok) return; const rows = await res.json(); const c = document.getElementById('memcount'); if (c) c.textContent = rows.length ? String(rows.length) : ''; } catch (_) { /* ignore */ }
+}
+async function toggleMemory() {
+  const panel = document.getElementById('memoryPanel'); if (!panel) return;
+  const open = panel.hidden; showPanel('memoryPanel', open); closeSidebar();
+  if (open) refreshMemories();
+}
+function memoryRow(m) {
+  const row = el('div', 'item' + (m.pinned ? ' pinned' : ''));
+  const text = el('div', 'itext', (m.pinned ? '📌 ' : '') + m.text);
+  const meta = el('div', 'imeta', (m.tags || []).join(', ') + (m.source ? ' · ' + m.source : ''));
+  const acts = el('div', 'iacts');
+  const mk = (label, fn) => { const b = el('button', '', label); b.addEventListener('click', fn); acts.appendChild(b); };
+  mk(m.pinned ? 'Unpin' : 'Pin', async () => { await fetch('/memories/' + m.id, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({pinned: !m.pinned})}); refreshMemories(); });
+  mk('Edit', async () => {
+    const next = typeof prompt === 'function' ? prompt('Edit memory', m.text) : null; if (next === null || !next.trim()) return;
+    const res = await fetch('/memories/' + m.id, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text: next})});
+    document.getElementById('memstatus').textContent = res.ok ? 'Updated.' : await res.text(); refreshMemories();
+  });
+  mk('Forget', async () => { await fetch('/memories/' + m.id + '/delete', {method: 'POST'}); refreshMemories(); });
+  row.append(text, meta, acts);
+  return row;
+}
+async function refreshMemories() {
+  const list = document.getElementById('memlist'); if (!list) return;
+  const q = (document.getElementById('memsearch') || {}).value || '';
+  try {
+    const res = await fetch('/memories' + (q ? '?q=' + encodeURIComponent(q) : '')); if (!res.ok) throw new Error(await res.text());
+    const rows = await res.json();
+    list.replaceChildren();
+    if (!rows.length) list.appendChild(el('div', 'muted', q ? 'No matches.' : 'No memories yet. Tell the agent "remember that …" or add one above.'));
+    for (const m of rows) list.appendChild(memoryRow(m));
+    const c = document.getElementById('memcount'); if (c && !q) c.textContent = rows.length ? String(rows.length) : '';
+  } catch (e) { document.getElementById('memstatus').textContent = e.message; }
+}
+async function addMemory(textArg) {
+  const textEl = document.getElementById('memtext'), tagsEl = document.getElementById('memtags');
+  const text = (textArg || (textEl && textEl.value) || '').trim(); if (!text) return;
+  const tags = ((tagsEl && tagsEl.value) || '').split(',').map(t => t.trim()).filter(Boolean);
+  const res = await fetch('/memories', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text, tags})});
+  const st = document.getElementById('memstatus');
+  if (!res.ok) { st.textContent = await res.text(); return; }
+  if (textEl) textEl.value = ''; if (tagsEl) tagsEl.value = '';
+  st.textContent = 'Remembered.'; if (textArg) note('Memory saved: ' + text, 'mem');
+  const panel = document.getElementById('memoryPanel'); if (panel && !panel.hidden) refreshMemories(); else refreshMemoryCount();
+}
+
+/* ---------------- schedules panel ---------------- */
+async function refreshScheduleCount() {
+  try { const res = await fetch('/schedules'); if (!res.ok) return; const rows = await res.json(); const c = document.getElementById('schedcount'); if (c) c.textContent = rows.length ? String(rows.length) : ''; } catch (_) { /* ignore */ }
+}
+async function toggleSchedules() {
+  const panel = document.getElementById('schedulePanel'); if (!panel) return;
+  const open = panel.hidden; showPanel('schedulePanel', open); closeSidebar();
+  if (open) refreshSchedules();
+}
+function fmtTime(ts) { if (!ts) return '—'; try { return new Date(ts * 1000).toLocaleString(); } catch (_) { return String(ts); } }
+function scheduleRow(j) {
+  const row = el('div', 'item' + (j.enabled ? '' : ' off'));
+  row.appendChild(el('div', 'itext', (j.enabled ? '⏰ ' : '⏸ ') + j.title + ' — ' + j.when));
+  row.appendChild(el('div', 'imeta', 'next ' + (j.enabled ? fmtTime(j.next_run) : 'paused') + ' · last ' + (j.last_status || 'never') + (j.last_run ? ' (' + fmtTime(j.last_run) + ')' : '') + ' · runs ' + (j.runs || 0)));
+  const pr = el('div', 'iprompt', j.prompt); row.appendChild(pr);
+  if (j.last_result) row.appendChild(el('div', 'imeta', 'last result: ' + j.last_result.slice(0, 200)));
+  const acts = el('div', 'iacts');
+  const mk = (label, fn) => { const b = el('button', '', label); b.addEventListener('click', fn); acts.appendChild(b); };
+  mk('Run now', () => scheduleAction(j.id, 'run'));
+  mk(j.enabled ? 'Pause' : 'Resume', () => scheduleAction(j.id, 'toggle'));
+  mk('Delete', () => scheduleAction(j.id, 'delete'));
+  row.appendChild(acts);
+  return row;
+}
+async function refreshSchedules() {
+  const list = document.getElementById('schedlist'); if (!list) return;
+  try {
+    const res = await fetch('/schedules'); if (!res.ok) throw new Error(await res.text());
+    const rows = await res.json();
+    list.replaceChildren();
+    if (!rows.length) list.appendChild(el('div', 'muted', 'No automations yet.'));
+    for (const j of rows) list.appendChild(scheduleRow(j));
+    const c = document.getElementById('schedcount'); if (c) c.textContent = rows.length ? String(rows.length) : '';
+  } catch (e) { document.getElementById('schedstatus').textContent = e.message; }
+}
+async function addSchedule() {
+  const when = (document.getElementById('schedwhen') || {}).value || '', prompt_ = (document.getElementById('schedprompt') || {}).value || '', title = (document.getElementById('schedtitle') || {}).value || '';
+  const st = document.getElementById('schedstatus');
+  const res = await fetch('/schedules', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({when, prompt: prompt_, title})});
+  if (!res.ok) { st.textContent = await res.text(); return; }
+  st.textContent = 'Scheduled.'; document.getElementById('schedprompt').value = ''; refreshSchedules();
+}
+async function scheduleAction(id, action) {
+  const st = document.getElementById('schedstatus');
+  const res = await fetch('/schedules/' + id + '/' + action, {method: 'POST'});
+  st.textContent = res.ok ? (action === 'run' ? 'Started — the result opens as a new ⏰ conversation.' : 'Done.') : await res.text();
+  refreshSchedules();
+}
+let notifyTimer;
+async function pollNotifications() {
+  clearTimeout(notifyTimer);
+  try {
+    if (!turnRunning) {
+      const res = await fetch('/notifications');
+      if (res.ok) {
+        const rows = await res.json();
+        for (const n of rows || []) {
+          const d = note('⏰ ' + n.title + ' → ' + n.status + (n.preview ? ': ' + n.preview.slice(0, 120) : ''), 'mem');
+          if (n.conversation_id) { const b = el('button', 'linkbtn', 'open'); b.addEventListener('click', () => openConversation(n.conversation_id)); d.appendChild(b); }
+        }
+        if ((rows || []).length) { loadConversations(); refreshScheduleCount(); }
+      }
+    }
+  } catch (_) { /* offline */ }
+  notifyTimer = setTimeout(pollNotifications, 45000);
+}
+
+/* ---------------- skills import ---------------- */
+async function importSkills(input) {
+  const file = input.files && input.files[0]; if (!file) return;
+  const st = document.getElementById('skillstatus');
+  const fd = new FormData(); fd.append('file', file);
+  try {
+    const res = await fetch('/skills/import', {method: 'POST', body: fd});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    st.textContent = 'Imported ' + data.imported.length + ' skill(s)' + (data.errors.length ? '; ' + data.errors.length + ' failed: ' + data.errors.join('; ') : '.');
+    refreshSkills();
+  } catch (e) { st.textContent = 'Import failed: ' + e.message; }
+  input.value = '';
+}
+
+/* ---------------- quick model switch ---------------- */
+async function quickModelMenu() {
+  const sel = document.getElementById('modelquick'), pill = document.getElementById('modelpill');
+  if (!sel) return toggleSettings();
+  if (!sel.hidden) { sel.hidden = true; return; }
+  if (!currentProviderId) return toggleSettings();
+  sel.replaceChildren(); sel.appendChild(new Option('Loading models…', '')); sel.hidden = false;
+  try {
+    const res = await fetch('/models', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({provider: currentProviderId, key: '', url: '', models_url: '', refresh: false})});
+    const data = await res.json();
+    if (!res.ok || !Array.isArray(data.models) || !data.models.length) throw new Error(data.message || 'No models listed');
+    discoveredDetails = data.details || {};
+    sel.replaceChildren(); sel.appendChild(new Option('Switch model…', ''));
+    for (const m of data.models.slice(0, 400)) sel.appendChild(new Option(m, m));
+  } catch (e) { sel.hidden = true; document.getElementById('status').textContent = e.message + ' — use Settings to type a model.'; toggleSettings(); }
+}
+async function quickModelPicked() {
+  const sel = document.getElementById('modelquick'); if (!sel || !sel.value) return;
+  const name = sel.value; sel.hidden = true;
+  const d = discoveredDetails[name] || {};
+  const res = await fetch('/set_model', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({model: name, context_length: d.context_length || undefined})});
+  document.getElementById('status').textContent = res.ok ? 'Model: ' + name : await res.text();
+  refreshKeyStatus();
+}
+
+/* ---------------- theme, voice, capabilities ---------------- */
+function applyTheme(theme) {
+  if (!hasDOM) return;
+  if (theme === 'light' || theme === 'dark') document.documentElement.setAttribute('data-theme', theme); else document.documentElement.removeAttribute('data-theme');
+  const b = document.getElementById('themebtn'); if (b) b.textContent = '◐ Theme: ' + (theme || 'auto');
+  try { localStorage.setItem('grokbot-theme', theme || ''); } catch (_) { /* storage blocked */ }
+}
+function toggleTheme(force) {
+  let cur = ''; try { cur = localStorage.getItem('grokbot-theme') || ''; } catch (_) { /* ignore */ }
+  const next = force !== undefined && force !== '' ? force : (cur === '' ? 'light' : cur === 'light' ? 'dark' : '');
+  applyTheme(next === 'auto' ? '' : next);
+}
+let recognizer = null;
+function toggleMic() {
+  const SR = hasDOM && (window.SpeechRecognition || window.webkitSpeechRecognition); const mic = document.getElementById('mic');
+  if (!SR) return;
+  if (recognizer) { recognizer.stop(); recognizer = null; if (mic) mic.classList.remove('on'); return; }
+  recognizer = new SR(); recognizer.continuous = true; recognizer.interimResults = false; recognizer.lang = (navigator.language || 'en-US');
+  recognizer.onresult = e => { let t = ''; for (let i = e.resultIndex; i < e.results.length; i++) if (e.results[i].isFinal) t += e.results[i][0].transcript; if (t) { inp.value = (inp.value ? inp.value + ' ' : '') + t.trim(); inp.dispatchEvent(new Event('input')); } };
+  recognizer.onend = () => { recognizer = null; if (mic) mic.classList.remove('on'); };
+  recognizer.onerror = () => { recognizer = null; if (mic) mic.classList.remove('on'); };
+  recognizer.start(); if (mic) mic.classList.add('on');
+}
+async function loadCapabilities(force) {
+  const box = document.getElementById('mcpinfo'), info = document.getElementById('integrationinfo'); if (!box) return;
+  try {
+    const res = await fetch('/capabilities'); if (!res.ok) return;
+    const c = await res.json();
+    box.replaceChildren();
+    const servers = c.mcp || [];
+    if (!servers.length) box.textContent = 'MCP servers: none configured.';
+    else for (const s of servers) box.appendChild(el('div', '', 'MCP ' + s.name + ' (' + s.transport + '): ' + s.state + (s.tools ? ' · ' + s.tools + ' tools' : '') + (s.error ? ' · ' + s.error : '')));
+    if (info) info.textContent = 'Telegram: ' + (c.telegram ? 'on' : 'off') + ' · plugins: ' + ((c.plugins || []).join(', ') || 'none') + ' · local provider: ' + (c.local_provider ? 'yes' : 'no') + ' · memories: ' + ((c.memory || {}).count || 0) + ' · automations: ' + ((c.schedules || {}).count || 0) + (c.sandbox ? ' · sandbox: ' + c.sandbox.backend : '');
+  } catch (_) { /* ignore */ }
+}
+async function reloadMcp() {
+  const box = document.getElementById('mcpinfo'); if (box) box.textContent = 'Reconnecting MCP servers…';
+  try { await fetch('/mcp/reload', {method: 'POST'}); } catch (_) { /* ignore */ }
+  setTimeout(() => loadCapabilities(true), 1500);
+}
+
 function boot() {
+  try { applyTheme(localStorage.getItem('grokbot-theme') || ''); } catch (_) { /* ignore */ }
+  const mic = document.getElementById('mic'); if (mic && (window.SpeechRecognition || window.webkitSpeechRecognition)) mic.hidden = false;
   restoreTasks();
-  restoreHistory();
+  const initial = document.body && document.body.dataset ? document.body.dataset.cid : '';
+  if (initial) openConversation(initial).then(() => attachCurrentTurn()); else restoreHistory();
   loadPolicy();
   refreshKeyStatus();
+  refreshMemoryCount();
+  refreshScheduleCount();
+  notifyTimer = setTimeout(pollNotifications, 20000);
+  window.addEventListener('popstate', e => { const cid = (e.state && e.state.cid) || (location.pathname.startsWith('/c/') ? location.pathname.slice(3) : ''); if (cid && cid !== currentConversation) openConversation(cid); });
 }
 if (hasDOM) boot();

@@ -5,9 +5,13 @@
   --danger: #e5766b; --warn: #e0b35a; --info: #9ac6ff; --you: #1b2735; --code: #0b0f13;
 }
 @media (prefers-color-scheme: light) {
-  :root { color-scheme: light; --bg: #f7f8fa; --panel: #ffffff; --panel2: #f1f3f6; --border: #e1e5ea; --border2: #cfd5dc;
+  :root:not([data-theme="dark"]) { color-scheme: light; --bg: #f7f8fa; --panel: #ffffff; --panel2: #f1f3f6; --border: #e1e5ea; --border2: #cfd5dc;
           --text: #1b1f24; --muted: #5d6670; --muted2: #7a838d; --you: #e4ecf7; --code: #f1f3f6; }
 }
+:root[data-theme="light"] { color-scheme: light; --bg: #f7f8fa; --panel: #ffffff; --panel2: #f1f3f6; --border: #e1e5ea; --border2: #cfd5dc;
+          --text: #1b1f24; --muted: #5d6670; --muted2: #7a838d; --you: #e4ecf7; --code: #f1f3f6; }
+:root[data-theme="dark"] { color-scheme: dark; --bg: #0e1114; --panel: #10141a; --panel2: #141a21; --border: #1e242c; --border2: #28313c;
+          --text: #e6e9ec; --muted: #8b949c; --muted2: #6b7480; --you: #1b2735; --code: #0b0f13; }
 * { box-sizing: border-box; }
 body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text);
        height: 100dvh; overflow: hidden; }
@@ -72,10 +76,10 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 @keyframes dots { 0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; } }
 
 /* ---------- skills ---------- */
-#skillsPanel { padding: 12px 16px; border-bottom: 1px solid var(--border); max-height: 55vh; overflow: auto; font-size: 12px; }
-#skillsPanel p { color: var(--muted); font-size: 11px; margin: 6px 0; }
-#skillsPanel input, #skillsPanel select, #skillsPanel textarea { background: var(--panel2); color: var(--text); border: 1px solid var(--border2); border-radius: 8px; padding: 7px 9px; font-size: 12px; }
-#skillsPanel button { background: var(--panel2); color: var(--text); border: 1px solid var(--border2); border-radius: 8px; padding: 6px 10px; cursor: pointer; font-size: 11.5px; }
+#skillsPanel, .panel { padding: 12px 16px; border-bottom: 1px solid var(--border); max-height: 55vh; overflow: auto; font-size: 12px; }
+#skillsPanel p, .panel p { color: var(--muted); font-size: 11px; margin: 6px 0; }
+#skillsPanel input, #skillsPanel select, #skillsPanel textarea, .panel input, .panel select, .panel textarea { background: var(--panel2); color: var(--text); border: 1px solid var(--border2); border-radius: 8px; padding: 7px 9px; font-size: 12px; }
+#skillsPanel button, .panel button, .btnlink { background: var(--panel2); color: var(--text); border: 1px solid var(--border2); border-radius: 8px; padding: 6px 10px; cursor: pointer; font-size: 11.5px; }
 #skillstatus { color: var(--muted2); font-size: 11px; margin-left: 8px; }
 
 /* ---------- chat ---------- */
@@ -167,3 +171,44 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   .toolcard, .approval { margin-left: 4px; margin-right: 4px; }
   #crumb { display: none; }
 }
+
+/* ---------- phase 3-5 additions ---------- */
+.count { margin-left: auto; font-size: 10px; color: var(--muted2); background: var(--panel2); border-radius: 999px; padding: 1px 6px; }
+.row-tight { display: flex; gap: 6px; }
+.row-wrap { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+.btnlink { display: inline-block; text-decoration: none; font-size: 11.5px; cursor: pointer; }
+.list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.item { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--panel); }
+.item.pinned { border-color: var(--warn); }
+.item.off { opacity: .6; }
+.item .itext { font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
+.item .imeta { font-size: 10.5px; color: var(--muted2); margin-top: 2px; }
+.item .iprompt { font-size: 11.5px; color: var(--muted); margin-top: 4px; white-space: pre-wrap; max-height: 80px; overflow: auto; }
+.item .iacts { display: flex; gap: 6px; margin-top: 6px; }
+.item .iacts button { padding: 3px 8px; font-size: 11px; }
+#modelquick { max-width: 260px; }
+#exportbtn { padding: 3px 7px; }
+.ctxinfo { margin: 2px 14px; font-size: 11px; color: var(--muted2); }
+.ctxinfo summary { cursor: pointer; list-style: none; }
+.ctxinfo summary::before { content: '▸ '; font-size: 10px; }
+.ctxinfo[open] summary::before { content: '▾ '; }
+.ctxinfo .ctxbody { padding: 4px 0 2px 12px; border-left: 2px solid var(--border2); margin-top: 3px; }
+.ctxinfo .ctxitem { padding: 1px 0; color: var(--muted); }
+.subagent { margin: 4px 14px; border: 1px dashed var(--border2); border-radius: 10px; background: var(--panel); font-size: 12px; }
+.subagent summary { cursor: pointer; padding: 5px 10px; display: flex; gap: 8px; align-items: center; list-style: none; color: var(--muted); }
+.subagent summary b { color: var(--info); }
+.subagent summary code { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 55%; }
+.subagent .tmeta { margin-left: auto; font-size: 10.5px; color: var(--muted2); }
+.subagent.running summary::after { content: ''; width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--info); border-top-color: transparent; animation: spin .8s linear infinite; margin-left: 6px; }
+.subagent .subbody { padding: 4px 6px 6px; }
+.subagent .subbody .toolcard { margin: 3px 4px; }
+.subagent .subtext { font-size: 12px; color: var(--muted); white-space: pre-wrap; padding: 4px 8px; max-height: 200px; overflow: auto; }
+.sysnote.mem { color: var(--accent); }
+.linkbtn { background: transparent; border: 0; color: var(--info); cursor: pointer; font-size: 11px; text-decoration: underline; padding: 0 4px; }
+.attachments { display: flex; gap: 6px; flex-wrap: wrap; padding: 6px 8px 0; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; background: var(--panel2); border: 1px solid var(--border2); border-radius: 8px; padding: 3px 6px; }
+.chip img { width: 28px; height: 28px; object-fit: cover; border-radius: 4px; }
+.chip .x { background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 13px; padding: 0 2px; }
+.msg.you img.thumb { display: block; max-width: 240px; max-height: 180px; border-radius: 8px; margin-top: 6px; }
+#composer.drop { outline: 2px dashed var(--accent); outline-offset: -2px; }
+#mic.on { color: var(--danger); }

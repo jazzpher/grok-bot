@@ -52,6 +52,7 @@ class ToolSpec:
     mutates: bool = False
     needs_approval: Optional[Callable[[ToolContext, dict], Optional[str]]] = None
     available: Optional[Callable[[ToolContext], bool]] = None
+    parallel_safe: bool = False                      # may run concurrently with other calls in the same step
 
     def openai(self):
         return {'type': 'function', 'function': {
@@ -146,6 +147,12 @@ class ToolRegistry:
     def names(self):
         return list(self._tools)
 
+    def unregister(self, name):
+        return self._tools.pop(name, None)
+
+    def names_for(self, ctx):
+        return [name for name, spec in self._tools.items() if spec.available is None or spec.available(ctx)]
+
     def describe(self):
         """Public summary for /capabilities and the CLI."""
         return [{'name': t.name, 'description': t.description.split('\n')[0][:200], 'category': t.category, 'mutates': t.mutates}
@@ -198,10 +205,13 @@ class ToolRegistry:
                 arguments = json.loads(arguments) if arguments.strip() else {}
             except ValueError:
                 return ToolResult(name, {}, 'Tool error: arguments were not valid JSON.', False, time.monotonic() - started)
+        from grokbot import plugins
+        result = None
         try:
             clean = validate_arguments(spec, arguments)
             if spec.available is not None and not spec.available(ctx):
                 raise ToolError(name + ' is not available in this configuration.')
+            clean = plugins.run_before_tool(ctx, name, clean)
             if spec.needs_approval is not None and ctx.approvals is not None:
                 reason = spec.needs_approval(ctx, clean)
                 if reason:
@@ -212,18 +222,22 @@ class ToolRegistry:
             if output is None:
                 output = ''
             text, truncated = bound_output(output)
-            return ToolResult(name, clean, text, True, time.monotonic() - started, truncated)
+            result = ToolResult(name, clean, text, True, time.monotonic() - started, truncated)
         except ToolError as exc:
-            return ToolResult(name, arguments if isinstance(arguments, dict) else {}, 'Tool error: ' + str(exc), False, time.monotonic() - started)
+            result = ToolResult(name, arguments if isinstance(arguments, dict) else {}, 'Tool error: ' + str(exc), False, time.monotonic() - started)
         except (OSError, UnicodeError, ValueError, TypeError) as exc:
-            return ToolResult(name, arguments if isinstance(arguments, dict) else {},
-                              'Tool error: ' + type(exc).__name__ + ': ' + str(exc)[:500], False, time.monotonic() - started)
+            result = ToolResult(name, arguments if isinstance(arguments, dict) else {},
+                                'Tool error: ' + type(exc).__name__ + ': ' + str(exc)[:500], False, time.monotonic() - started)
+        return plugins.run_after_tool(ctx, result)
 
 
-def default_registry():
-    """All built-in tools. Availability of shell/web tools is decided per context."""
-    from grokbot.tools import files, misc, shell, skills, web
+def default_registry(plugins_too=True):
+    """All built-in tools. Availability of shell/web/memory/scheduler tools is decided per context."""
+    from grokbot.tools import delegate, files, memory, misc, schedule, shell, skills, web
     registry = ToolRegistry()
-    for module in (files, misc, skills, shell, web):
+    for module in (files, misc, skills, shell, web, memory, delegate, schedule):
         module.register(registry)
+    if plugins_too:
+        from grokbot import plugins
+        plugins.load(registry)
     return registry

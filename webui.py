@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """Local chat and bounded tasks. Public exposure requires GROK_APP_PASSWORD."""
 import argparse
+import collections
+import dataclasses
 import hmac
+import io
 import ipaddress
 import json
 import os
+import re
 import secrets
 import socket
 import threading
 import time
+import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
 import requests
@@ -23,6 +28,9 @@ import grokbot
 from grokbot import agent as agent_core, compaction, config as gconfig, netguard, providers as provider_client, sandbox as sandbox_mod
 from grokbot.approvals import ApprovalBroker, PolicyStore, SandboxPolicy, MODES as SANDBOX_MODES, APPROVALS as APPROVAL_MODES
 from grokbot.conversations import ConversationStore
+from grokbot.memory import MemoryStore
+from grokbot.scheduler import Scheduler, ScheduleError
+from grokbot.mcp import MCPManager
 from grokbot.tools import ToolContext, default_registry
 from grokbot.tools.web import search_backend
 
@@ -49,9 +57,16 @@ PROVIDER_ROWS = [
 PROVIDERS = {pid: {'label': label, 'url': url, 'model_hint': hint}
              for pid, label, url, hint in PROVIDER_ROWS}
 ALLOWED_API_URLS = {p['url'] for p in PROVIDERS.values()}
-# A local provider may be configured by the server owner, never through public settings.
-if urlparse(API_URL).hostname in ('127.0.0.1', 'localhost'):
-    ALLOWED_API_URLS.add(API_URL)
+# A local provider (Ollama, LM Studio, vLLM, llama.cpp…) may be configured by the server owner through the
+# environment, never through public settings: GROK_LOCAL_API_URL=http://127.0.0.1:11434/v1/chat/completions
+LOCAL_API_URL = os.environ.get('GROK_LOCAL_API_URL', '').strip()
+if not LOCAL_API_URL and urlparse(API_URL).hostname in ('127.0.0.1', 'localhost'):
+    LOCAL_API_URL = API_URL
+if LOCAL_API_URL and urlparse(LOCAL_API_URL).scheme in ('http', 'https'):
+    PROVIDERS['local'] = {'label': 'Local model (' + (urlparse(LOCAL_API_URL).hostname or 'local') + ')', 'url': LOCAL_API_URL,
+                          'model_hint': os.environ.get('GROK_LOCAL_MODEL', '')}
+    ALLOWED_API_URLS.add(LOCAL_API_URL)
+    model_discovery.MODEL_URLS['local'] = re.sub(r'/chat/completions/?$', '/models', LOCAL_API_URL)
 # Key prefixes that identify a provider when neither provider nor URL is given.
 KEY_PREFIXES = (('AIza', 'gemini'), ('AQ.', 'gemini'), ('nvapi-', 'nvidia'),
                 ('sk-or-', 'openrouter'), ('gsk_', 'groq'))
@@ -234,7 +249,14 @@ def iter_bounded_sse_lines(response):
 
 @app.route('/')
 def index():
-    return render_template('index.html', version=grokbot.__version__)
+    return render_template('index.html', version=grokbot.__version__, initial_cid='')
+
+
+@app.route('/c/<cid>')
+def index_conversation(cid):
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', cid):
+        return redirect('/')
+    return render_template('index.html', version=grokbot.__version__, initial_cid=cid)
 
 @app.route('/chat', methods=['POST'])
 def chat():
@@ -802,6 +824,8 @@ def set_key():
         if url:
             return Response('Pick a provider from the list or a custom URL, not both.', status=400)
         url = PROVIDERS[provider]['url']
+        if provider == 'local' and not key:
+            key = 'local'   # local OpenAI-compatible servers accept any bearer token
     if not url and key:
         for prefix, pid in KEY_PREFIXES:
             if key.startswith(prefix):
@@ -892,6 +916,186 @@ def resolve_conversation(store, sid, requested):
     return conv
 
 
+MEMORY = None
+SCHEDULER = None
+MCP = None
+TELEGRAM = None
+NOTIFICATIONS = collections.defaultdict(list)     # owner -> [{...}] delivered to the web UI by /notifications
+PERSISTED_EVENTS = ('tool_start', 'tool_end', 'approval', 'compaction', 'error', 'status', 'subagent_start', 'subagent_end',
+                    'memory_saved', 'schedule_created')
+UNATTENDED_NOTE = ('This is an unattended scheduled run: nobody can answer questions or approve actions, and anything that needs '
+                   'approval is denied automatically. Do the task with the tools that are allowed and finish with a concise report.')
+
+
+def memory_store():
+    global MEMORY
+    with conversations_lock:
+        if MEMORY is None:
+            MEMORY = MemoryStore(Path(os.environ.get('GROK_MEMORY_DB', str(WORKSPACES / '.memory.sqlite3'))))
+        return MEMORY
+
+
+def scheduler():
+    global SCHEDULER
+    with conversations_lock:
+        if SCHEDULER is None:
+            SCHEDULER = Scheduler(Path(os.environ.get('GROK_SCHEDULE_DB', str(WORKSPACES / '.schedules.sqlite3'))), runner=run_scheduled_job)
+        return SCHEDULER
+
+
+def mcp_manager(reload=False):
+    """MCP servers from GROK_MCP_CONFIG / ./mcp.json, registered into the shared tool registry (lazy, on first use)."""
+    global MCP
+    with conversations_lock:
+        if MCP is None or reload:
+            if MCP is not None:
+                MCP.close()
+            MCP = MCPManager().load()
+            if MCP.servers:
+                threading.Thread(target=MCP.register_tools, args=(REGISTRY,), daemon=True, name='mcp-connect').start()
+        return MCP
+
+
+def owner_dirname(owner):
+    return re.sub(r'[^A-Za-z0-9_-]+', '-', owner)[:80] or 'anon'
+
+
+def owner_workspace(owner):
+    """Workspace for any owner: web sessions use workspaces/<sid>, Telegram chats workspaces/tg-<chat>."""
+    with clients_lock:
+        c = clients.get(owner)
+    if c is not None:
+        return c['workspace']
+    return Workspace(WORKSPACES / owner_dirname(owner))
+
+
+def user_content(text, images=None):
+    """OpenAI-style message content: plain text, or text + image_url parts when images are attached."""
+    if not images:
+        return text
+    parts = [{'type': 'text', 'text': text}]
+    parts += [{'type': 'image_url', 'image_url': {'url': img['data_url'], 'detail': 'auto'}} for img in images]
+    return parts
+
+
+def validate_images(images):
+    if images is None:
+        return []
+    if not isinstance(images, list) or len(images) > 4:
+        raise ValueError('Attach at most 4 images.')
+    out = []
+    for img in images:
+        if not isinstance(img, dict) or not isinstance(img.get('data_url'), str):
+            raise ValueError('Each image needs a data_url.')
+        url = img['data_url']
+        if not re.match(r'^data:image/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$', url) or len(url) > 2_800_000:
+            raise ValueError('Images must be PNG/JPEG/WebP/GIF data URLs up to ~2 MB.')
+        out.append({'name': secure_filename(str(img.get('name') or 'image'))[:80] or 'image', 'data_url': url})
+    return out
+
+
+def run_owner_turn(owner, workspace, cid, text, *, emit, stop, images=None, uploads=None, json_mode=False,
+                   unattended=False, policy=None, cfg=None, extras=None, system_extra=''):
+    """One agent turn on an existing conversation, persisted. Shared by /agent, the scheduler and Telegram.
+    Returns (TurnResult, ToolContext). ``emit`` receives every event; the persisted entry keeps the notable ones."""
+    store = conversation_store()
+    note = text + ''.join('\n[image: %s]' % img['name'] for img in (images or []))
+    store.append_entry(cid, owner, 'user', note)
+    prior, summary = store.get_context(cid, owner)
+    cfg = cfg or config_snapshot()
+    mock = bool(app.config['MOCK'] and not cfg[0])
+    policy = policy or POLICIES.load(owner)
+    if unattended:
+        policy = dataclasses.replace(policy, approval='never')
+    mcp_manager()
+    ctx_extras = {'json_mode': json_mode, 'owner': owner, 'memory': memory_store(), 'conversations': store,
+                  'scheduler': scheduler(), 'uploads': list(uploads or []), 'unattended': unattended}
+    ctx_extras.update(extras or {})
+    ctx = ToolContext(workspace=workspace, session_id=owner, policy=policy, approvals=APPROVALS, stop=stop, extras=ctx_extras)
+    kept = []
+
+    def record(event):
+        if event.get('type') in PERSISTED_EVENTS:
+            kept.append(event)
+        emit(event)
+    extra_prompt = '\n\n'.join(x for x in (system_extra, UNATTENDED_NOTE if unattended else '') if x)
+    messages = list(prior) + [{'role': 'user', 'content': user_content(text, images)}]
+    result = agent_core.run_turn(
+        messages, REGISTRY, ctx, cfg, record,
+        max_steps=gconfig.SCHEDULED_MAX_STEPS if unattended else None,
+        context_tokens=current_context_tokens(), model_label=cfg[2] + (' via ' + provider_label(cfg[1]) if cfg[1] else ''),
+        system_extra=extra_prompt, summarizer=None if mock else make_summarizer(cfg), previous_summary=summary,
+        stream_fn=mock_stream if mock else agent_stream_fn)
+    store.append_entry(cid, owner, 'assistant', result.text or '', events=kept)
+    store.set_context(cid, owner, result.messages, result.summary)
+    return result, ctx
+
+
+def notify(owner, payload):
+    box = NOTIFICATIONS[owner]
+    box.append(dict(payload, time=time.time()))
+    del box[:-50]
+
+
+def run_scheduled_job(job):
+    """Scheduler callback: run the job's prompt as an unattended turn in a fresh conversation and deliver the result."""
+    owner = job['owner']
+    store = conversation_store()
+    cid = store.create(owner, '⏰ ' + job['title'])
+    workspace = owner_workspace(owner)
+    result, _ = run_owner_turn(owner, workspace, cid, job['prompt'], emit=lambda e: None, stop=threading.Event(),
+                               unattended=True, extras={'delivery': job.get('delivery') or {}})
+    summary = (result.text or '').strip()
+    notify(owner, {'type': 'schedule', 'job_id': job['id'], 'title': job['title'], 'conversation_id': cid,
+                   'status': result.status, 'preview': summary[:200]})
+    chat_id = (job.get('delivery') or {}).get('telegram_chat')
+    if chat_id and TELEGRAM is not None:
+        try:
+            TELEGRAM.send(chat_id, '⏰ %s\n\n%s' % (job['title'], summary or '(no output)'))
+        except Exception:  # noqa: BLE001
+            pass
+    return result.status, summary[:300]
+
+
+class TelegramRunner:
+    """Adapter between the Telegram gateway and run_owner_turn (one current conversation per chat)."""
+
+    def __init__(self):
+        self.current = {}
+
+    def conversation_for(self, owner):
+        store = conversation_store()
+        cid = self.current.get(owner)
+        if cid and store.get(cid, owner):
+            return cid
+        rows = store.list(owner, limit=1)
+        cid = rows[0]['id'] if rows else store.create(owner, 'Telegram')
+        self.current[owner] = cid
+        return cid
+
+    def new_conversation(self, owner):
+        self.current[owner] = conversation_store().create(owner, 'Telegram')
+        return self.current[owner]
+
+    def __call__(self, owner, text, emit, stop):
+        chat_id = owner.split(':', 1)[1] if ':' in owner else owner
+        cid = self.conversation_for(owner)
+        result, _ = run_owner_turn(owner, owner_workspace(owner), cid, text, emit=emit, stop=stop,
+                                   extras={'delivery': {'telegram_chat': chat_id}})
+        return result
+
+
+def start_telegram():
+    """Start the Telegram gateway when GROK_TELEGRAM_TOKEN is set (allowlist required; fails closed)."""
+    global TELEGRAM
+    if not gconfig.TELEGRAM_TOKEN:
+        return None
+    from grokbot.gateway.telegram import TelegramGateway
+    TELEGRAM = TelegramGateway(gconfig.TELEGRAM_TOKEN, gconfig.TELEGRAM_ALLOWED_IDS, TelegramRunner(), approvals=APPROVALS, policy_store=POLICIES)
+    TELEGRAM.start()
+    return TELEGRAM
+
+
 class AgentRun:
     """One running /agent turn: worker thread + event log so a reloaded page can reattach."""
 
@@ -912,7 +1116,7 @@ class AgentRun:
 
 @app.route('/agent', methods=['POST'])
 def agent_route():
-    if request.content_length and request.content_length > 40000:
+    if request.content_length and request.content_length > 12_000_000:
         return Response('JSON request too large.', status=413)
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
@@ -920,6 +1124,10 @@ def agent_route():
     text = data.get('message')
     if not isinstance(text, str) or not text.strip() or len(text) > 12000:
         return Response('Send a message of 1–12000 characters.', status=400)
+    try:
+        images = validate_images(data.get('images'))
+    except ValueError as exc:
+        return Response(str(exc), status=400)
     c = client()
     sid = session['sid']
     if not c['busy'].acquire(False):
@@ -931,56 +1139,33 @@ def agent_route():
     store = conversation_store()
     try:
         conv = resolve_conversation(store, sid, data.get('conversation_id'))
-        store.append_entry(conv['id'], sid, 'user', text)
-        prior, summary = store.get_context(conv['id'], sid)
     except Exception:
         c['busy'].release()
         raise
-    cfg = config_snapshot()
-    mock = bool(app.config['MOCK'] and not cfg[0])
-    policy = POLICIES.load(sid)
-    ctx = ToolContext(workspace=c['workspace'], session_id=sid, policy=policy, approvals=APPROVALS, stop=c['stop'],
-                      extras={'json_mode': c.get('json_mode', False)})
-    messages = list(prior) + [{'role': 'user', 'content': text}]
-    turn = agent_core.ThreadedTurn(
-        agent_core.run_turn, messages, REGISTRY, ctx, cfg,
-        context_tokens=current_context_tokens(), model_label=cfg[2] + (' via ' + provider_label(cfg[1]) if cfg[1] else ''),
-        system_extra=upload_note(c), summarizer=None if mock else make_summarizer(cfg), previous_summary=summary,
-        stream_fn=mock_stream if mock else agent_stream_fn)
-    run = AgentRun(turn, conv['id'])
+    run = AgentRun(None, conv['id'])
     c['agent_run'] = run
-    title = store.get(conv['id'], sid)['title']
+    title = conv['title']
+    json_mode = bool(c.get('json_mode', False))
 
-    def finish():
-        """Persist the result (runs on the worker thread side, after the loop ends, even if the browser left)."""
+    def work():
         try:
-            result = turn.result
-            if result is not None:
-                store.append_entry(conv['id'], sid, 'assistant', result.text or '',
-                                   events=[e for e in run.events if e['type'] in ('tool_start', 'tool_end', 'approval', 'compaction', 'error', 'status')])
-                store.set_context(conv['id'], sid, result.messages, result.summary)
-                if ctx.extras.get('json_mode'):
-                    c['json_mode'] = True
-                # Mirror the exchange into the legacy history so /task and /chat keep shared context.
-                c['history'] = (c['history'] + [{'role': 'user', 'content': text}, {'role': 'assistant', 'content': result.text or ''}])[-24:]
-                try:
-                    task_manager().store_history(sid, c['history'])
-                except Exception:
-                    pass
+            result, ctx = run_owner_turn(sid, c['workspace'], conv['id'], text, emit=run.record, stop=c['stop'], images=images,
+                                         uploads=list(c['uploads']), json_mode=json_mode, system_extra=upload_note(c))
+            if ctx.extras.get('json_mode'):
+                c['json_mode'] = True
+            # Mirror the exchange into the legacy history so /task and /chat keep shared context.
+            c['history'] = (c['history'] + [{'role': 'user', 'content': text}, {'role': 'assistant', 'content': result.text or ''}])[-24:]
+            try:
+                task_manager().store_history(sid, c['history'])
+            except Exception:
+                pass
+        except BaseException as exc:  # noqa: BLE001 - surfaced to the browser
+            run.record({'type': 'error', 'text': 'Internal error: ' + type(exc).__name__ + ': ' + str(exc)[:300]})
+            run.record({'type': 'done', 'status': 'error', 'steps': 0, 'tool_calls': 0, 'usage': {}})
         finally:
             run.done.set()
             c['busy'].release()
-
-    def pump():
-        """Drain the worker queue into the run log, then persist. Independent of the HTTP connection."""
-        try:
-            for event in turn.events(heartbeat=5.0):
-                if event['type'] != 'heartbeat':
-                    run.record(event)
-        finally:
-            finish()
-    turn.start()
-    threading.Thread(target=pump, daemon=True).start()
+    threading.Thread(target=work, daemon=True, name='agent-' + sid[:8]).start()
 
     def generate():
         yield json.dumps({'type': 'conversation', 'id': conv['id'], 'title': title}) + '\n'
@@ -1186,9 +1371,219 @@ def set_model():
 
 @app.route('/capabilities')
 def capabilities():
+    from grokbot import plugins as plugin_mod
+    sid = session['sid']
     return json_response({'version': grokbot.__version__, 'tools': REGISTRY.describe(), 'sandbox': sandbox_mod.describe(),
                          'search_backend': search_backend(), 'tool_mode': gconfig.TOOL_MODE,
-                         'limits': {'max_steps': gconfig.MAX_STEPS, 'context_tokens': current_context_tokens()}})
+                         'limits': {'max_steps': gconfig.MAX_STEPS, 'context_tokens': current_context_tokens(),
+                                    'subagent_depth': gconfig.MAX_SUBAGENT_DEPTH},
+                         'memory': {'count': memory_store().count(sid)},
+                         'schedules': {'count': len(scheduler().list(sid)), 'running': SCHEDULER is not None and SCHEDULER._thread is not None},
+                         'mcp': mcp_manager().describe(), 'plugins': plugin_mod.loaded(),
+                         'telegram': TELEGRAM is not None, 'local_provider': 'local' in PROVIDERS})
+
+
+# ---------------------------------------------------------------------------
+# Memory, schedules, MCP, skills import/export, conversation export, notifications
+# ---------------------------------------------------------------------------
+@app.route('/memories', methods=['GET', 'POST'])
+def memories_route():
+    sid = session['sid']
+    store = memory_store()
+    if request.method == 'GET':
+        q = (request.args.get('q') or '').strip()
+        return json_response(store.search(sid, q, limit=100) if q else store.list(sid))
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get('text'), str):
+        return Response('Send {"text": ..., "tags": [...], "pinned": bool}.', status=400)
+    try:
+        row = store.save(sid, data['text'], data.get('tags'), source='user', pinned=bool(data.get('pinned', False)))
+    except ValueError as exc:
+        return Response(str(exc), status=400)
+    return json_response(row)
+
+
+@app.route('/memories/<mid>', methods=['POST'])
+def memory_update(mid):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return Response('Send a JSON object.', status=400)
+    try:
+        row = memory_store().update(session['sid'], mid, text=data.get('text'), tags=data.get('tags'),
+                                    pinned=data['pinned'] if isinstance(data.get('pinned'), bool) else None)
+    except ValueError as exc:
+        return Response(str(exc), status=400)
+    if row is None:
+        return Response('No such memory.', status=404)
+    return json_response(row)
+
+
+@app.route('/memories/<mid>/delete', methods=['POST'])
+def memory_delete(mid):
+    if not memory_store().delete(session['sid'], mid):
+        return Response('No such memory.', status=404)
+    return json_response({'ok': True})
+
+
+@app.route('/schedules', methods=['GET', 'POST'])
+def schedules_route():
+    sid = session['sid']
+    sched = scheduler()
+    if request.method == 'GET':
+        return json_response(sched.list(sid))
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get('when'), str) or not isinstance(data.get('prompt'), str):
+        return Response('Send {"when": "every day at 08:00", "prompt": "...", "title": "..."}.', status=400)
+    try:
+        job = sched.add(sid, data['when'], data['prompt'], str(data.get('title') or ''))
+    except ScheduleError as exc:
+        return Response(str(exc), status=400)
+    return json_response(job)
+
+
+@app.route('/schedules/<jid>/<action>', methods=['POST'])
+def schedule_action(jid, action):
+    sid = session['sid']
+    sched = scheduler()
+    job = sched.get(sid, jid)
+    if job is None:
+        return Response('No such scheduled task.', status=404)
+    if action == 'delete':
+        sched.delete(sid, jid)
+        return json_response({'ok': True})
+    if action == 'toggle':
+        return json_response(sched.set_enabled(sid, jid, not job['enabled']))
+    if action == 'run':
+        if jid in sched.running:
+            return Response('Already running.', status=409)
+        threading.Thread(target=sched.run_job, args=(job,), daemon=True, name='job-' + jid).start()
+        return json_response({'ok': True, 'started': True})
+    return Response('Unknown action.', status=404)
+
+
+@app.route('/notifications')
+def notifications_route():
+    sid = session['sid']
+    box = NOTIFICATIONS.get(sid) or []
+    NOTIFICATIONS[sid] = []
+    return json_response(box)
+
+
+@app.route('/mcp', methods=['GET'])
+def mcp_status():
+    manager = mcp_manager()
+    tools = [t for t in REGISTRY.describe() if t['name'].startswith('mcp__')]
+    return json_response({'config': str(manager.config_path or MCPManager.default_config_path() or ''), 'servers': manager.describe(), 'tools': tools})
+
+
+@app.route('/mcp/reload', methods=['POST'])
+def mcp_reload():
+    manager = mcp_manager(reload=True)
+    return json_response({'servers': manager.describe()})
+
+
+@app.route('/skills/export')
+def skills_export():
+    store = client()['workspace'].skills
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for row in store.list(include_archived=False):
+            try:
+                skill = store.read(row['name'])
+            except (ValueError, OSError):
+                continue
+            zf.writestr(row['name'] + '/SKILL.md', skill['content'] if isinstance(skill, dict) else str(skill))
+    buf.seek(0)
+    return send_file(buf, mimetype='application/zip', as_attachment=True, download_name='skills.zip')
+
+
+@app.route('/skills/import', methods=['POST'])
+def skills_import():
+    store = client()['workspace'].skills
+    upload = request.files.get('file')
+    if upload is None:
+        return json_response({'error': 'Upload a skills.zip (folders with SKILL.md).'}, 400)
+    raw = upload.read(2_000_001)
+    if len(raw) > 2_000_000:
+        return json_response({'error': 'Zip too large (2 MB max).'}, 413)
+    imported, errors = [], []
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(raw))
+    except zipfile.BadZipFile:
+        return json_response({'error': 'Not a zip file.'}, 400)
+    for info in zf.infolist()[:200]:
+        if not info.filename.endswith('SKILL.md') or info.file_size > 60000:
+            continue
+        parts = info.filename.replace('\\', '/').split('/')
+        if any(part in ('', '.', '..') for part in parts[:-1]) or info.filename.startswith('/'):
+            errors.append(info.filename + ': unsafe path')
+            continue
+        folder = parts[-2] if len(parts) >= 2 else ''
+        try:
+            text = zf.read(info).decode('utf-8')
+            name, description, body = parse_skill_markdown(text, folder)
+            existing = None
+            try:
+                existing = store.read(name)
+            except (ValueError, OSError):
+                pass
+            revision = existing.get('revision', '') if isinstance(existing, dict) else ''
+            store.save(name, description, body, revision, created_by='user')
+            imported.append(name)
+        except (ValueError, OSError, UnicodeError) as exc:
+            errors.append('%s: %s' % (info.filename, exc))
+    return json_response({'imported': imported, 'errors': errors})
+
+
+def parse_skill_markdown(text, fallback_name=''):
+    """SKILL.md with optional YAML/JSON front matter (name/description) -> (name, description, body)."""
+    name, description, body = fallback_name, '', text
+    m = re.match(r'^---\s*\n(.*?)\n---\s*\n?', text, re.S)
+    if m:
+        front, body = m.group(1), text[m.end():]
+        for line in front.splitlines():
+            if ':' not in line:
+                continue
+            key, value = line.split(':', 1)
+            key, value = key.strip().lower(), value.strip()
+            if value.startswith(('"', "'")) and value.endswith(value[0]) and len(value) >= 2:
+                value = value[1:-1]
+            if key == 'name':
+                name = value
+            elif key == 'description':
+                description = value
+    if not description:
+        first = next((ln.strip() for ln in body.splitlines() if ln.strip() and not ln.startswith('#')), '')
+        description = first[:200] or 'Imported skill'
+    if not name:
+        raise ValueError('skill has no name')
+    return name, description, body.strip() + '\n'
+
+
+@app.route('/conversations/<cid>/export')
+def conversation_export(cid):
+    sid = session['sid']
+    store = conversation_store()
+    conv = store.get(cid, sid)
+    if conv is None:
+        return Response('No such conversation.', status=404)
+    entries = store.entries(cid, sid)
+    fmt = request.args.get('format', 'md')
+    safe = secure_filename(conv['title'] or 'conversation')[:60] or 'conversation'
+    if fmt == 'json':
+        body = json.dumps({'id': cid, 'title': conv['title'], 'entries': entries}, ensure_ascii=False, indent=2)
+        return Response(body, content_type='application/json; charset=utf-8',
+                        headers={'Content-Disposition': 'attachment; filename="%s.json"' % safe})
+    lines = ['# ' + (conv['title'] or 'Conversation'), '']
+    for e in entries:
+        who = 'You' if e['role'] == 'user' else 'Assistant'
+        lines += ['## ' + who, '', e['content'] or '', '']
+        for ev in e.get('events') or []:
+            if ev.get('type') == 'tool_start':
+                lines.append('> tool `%s` %s' % (ev.get('name'), json.dumps(ev.get('arguments', {}), ensure_ascii=False)[:300]))
+        lines.append('')
+    return Response('\n'.join(lines), content_type='text/markdown; charset=utf-8',
+                    headers={'Content-Disposition': 'attachment; filename="%s.md"' % safe})
 
 
 def main():
@@ -1212,10 +1607,21 @@ def main():
         conversation_store().prune()
     except Exception:
         pass
+    scheduler().start()
+    mcp_manager()
+    try:
+        if start_telegram() is not None:
+            print('Telegram gateway: polling (allowlist %d ids)' % len(gconfig.TELEGRAM_ALLOWED_IDS))
+    except (ValueError, ImportError) as exc:
+        print('Telegram gateway not started: %s' % exc)
     try:
         app.run(host=args.host, port=args.port, debug=False, threaded=True)
     finally:
         manager.close()
+        if SCHEDULER is not None:
+            SCHEDULER.stop()
+        if MCP is not None:
+            MCP.close()
 
 if __name__ == '__main__':
     main()

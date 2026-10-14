@@ -5,22 +5,52 @@ OpenAI-compatible provider (Gemini, xAI, NVIDIA NIM, OpenRouter, Groq, Cerebras,
 Mistral, DeepSeek, or a custom https endpoint). The name does not mean it runs
 the Grok model: the provider and model you configure determine what answers.
 
-**What the agent can do (0.2):** read, search and edit files in a per-session
+**What the agent can do (0.9):** read, search and edit files in a per-session
 workspace; run shell commands in a sandbox with a Codex-style policy
 (`read-only` / `workspace-write` / `full-access` × `on-request` / `never`
 approvals, persisted "always allow" rules); fetch pages and search the web;
-remember and reuse skills; keep multiple searchable conversations with automatic
-context compaction; stream tool calls as expandable cards with Markdown
-rendering. Native tool calling is used when the provider supports it, with an
-automatic JSON-protocol fallback when it does not. See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the honest
-[docs/LIMITATIONS.md](docs/LIMITATIONS.md).
+**remember durable facts** (long-term memory, injected per turn, editable in the
+UI); search its own earlier conversations; remember and reuse skills (export /
+import as zip); **delegate** sub-tasks to isolated sub-agents; **schedule**
+prompts ("every weekday at 09:00 check CI") that run unattended; call tools from
+**MCP servers** (stdio or Streamable HTTP, `mcp.json`); accept **image
+attachments** for vision models; and be driven from the web UI, the terminal,
+`exec` in CI, or **Telegram** (allowlisted ids only). Plugins can add tools and
+hooks without forking. Native tool calling is used when the provider supports
+it, with an automatic JSON-protocol fallback when it does not. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/SECURITY.md](docs/SECURITY.md)
+and the honest [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 
 ```
 python -m grokbot chat                          # terminal agent in the current directory
 python -m grokbot exec "run the tests and fix the failure" --json   # CI / scripts
 python webui.py                                 # web UI on http://127.0.0.1:5000
+python -m grokbot telegram                      # Telegram gateway only (token + allowlist via env)
 python -m grokbot exec --mock "hello"           # offline smoke test, no key needed
+```
+
+### Memory, automations, sub-agents, MCP, Telegram (0.9)
+
+| Feature | How it works | Where |
+|---|---|---|
+| Long-term memory | `save_memory` / `search_memory` / `forget_memory` tools; pinned + relevant memories are added to the system prompt each turn; the *Context* row under each reply shows exactly what was injected | **Memory** panel, `/memory`, `/remember <fact>`, `GET/POST /memories` |
+| Session search | `search_history` / `read_history` tools over the FTS5 conversation store | automatic |
+| Sub-agents | `delegate(task, context, max_steps)` runs an isolated turn with its own context and a reduced tool set (no memory writes, no nested delegation beyond `GROK_MAX_SUBAGENT_DEPTH`); its tool calls stream as a nested card | automatic |
+| Automations | `schedule_task` tool or the **Automations** panel: `every day at 08:00`, `every 2 hours`, `every monday at 9:00`, `in 30 minutes`, `tomorrow at 09:00`, or 5-field cron. Runs are *unattended*: approval policy forced to `never`, step budget `GROK_SCHEDULED_MAX_STEPS` (25); each run becomes a ⏰ conversation and a notification | `/schedules`, `GET/POST /schedules` |
+| MCP client | `mcp.json` (or `GROK_MCP_CONFIG`) with `{"mcpServers": {"name": {"command", "args", "env"} or {"url", "headers"}}}`; tools appear as `mcp__<server>__<tool>`; `readOnlyHint`/`destructiveHint` annotations feed the approval policy | Settings → Integrations, `GET /mcp`, `POST /mcp/reload` |
+| Telegram | `GROK_TELEGRAM_TOKEN` + `GROK_TELEGRAM_ALLOWED_IDS=123,456` (fails closed without the allowlist). Long polling, streamed replies, approval buttons, `/new /stop /policy /status /help`; owner `tg:<chat_id>` with its own workspace, memory and policy | `python webui.py` starts it, or `python -m grokbot telegram` |
+| Plugins | `GROK_PLUGINS=my_module,other` — modules with `register(registry)`, `before_tool`, `after_tool`, `on_turn_end` hooks | — |
+| Local models | `GROK_LOCAL_API_URL=http://127.0.0.1:11434/v1/chat/completions` (Ollama, LM Studio, vLLM, llama.cpp) adds a *Local model* provider; no key needed | Settings → Provider |
+| Images | attach PNG/JPEG/WebP/GIF (drag-drop, paste or 🖼) — sent as `image_url` parts to vision-capable models | composer |
+| UI | per-conversation URLs (`/c/<id>`), Markdown/JSON export, in-composer model switch, theme toggle, installable (PWA manifest), dictation via the Web Speech API when the browser has it | — |
+
+Example `mcp.json` (copy `mcp.example.json`):
+
+```json
+{"mcpServers": {
+  "filesystem": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data"]},
+  "remote":     {"url": "https://mcp.example.com/mcp", "headers": {"Authorization": "Bearer …"}}
+}}
 ```
 
 Sandbox backends: `subprocess` (default — commands run as your user inside the
@@ -34,9 +64,13 @@ Configuration (environment): `GROK_API_KEY`, `GROK_API_URL`, `GROK_MODEL`,
 `GROK_CONTEXT_TOKENS` (default 128000, auto-filled from the model list when
 available), `GROK_SEARCH_BACKEND` (`auto`/`tavily`/`brave`/`searxng`/`duckduckgo`/`off`)
 with `TAVILY_API_KEY` / `BRAVE_API_KEY` / `GROK_SEARXNG_URL`, `GROK_MAX_FILE_BYTES`
-(10 MB), `GROK_MAX_WORKSPACE_BYTES` (500 MB), `GROK_MAX_FILES` (2000). Project
-rules in `AGENTS.md` / `GROKBOT.md` / `CLAUDE.md` at the workspace root are added to
-the system prompt.
+(10 MB), `GROK_MAX_WORKSPACE_BYTES` (500 MB), `GROK_MAX_FILES` (2000),
+`GROK_MAX_SUBAGENT_DEPTH` (1), `GROK_SCHEDULER_TICK` (30 s), `GROK_SCHEDULER_MAX_JOBS`
+(100), `GROK_SCHEDULED_MAX_STEPS` (25), `GROK_MCP_CONFIG`, `GROK_MCP_CONNECT_TIMEOUT`
+(20 s), `GROK_MCP_CALL_TIMEOUT` (90 s), `GROK_TELEGRAM_TOKEN`, `GROK_TELEGRAM_ALLOWED_IDS`,
+`GROK_PLUGINS`, `GROK_LOCAL_API_URL` / `GROK_LOCAL_MODEL`, `GROK_MEMORY_DB`,
+`GROK_SCHEDULE_DB`. Project rules in `AGENTS.md` / `GROKBOT.md` / `CLAUDE.md` at the
+workspace root are added to the system prompt.
 
 ## Run locally
 

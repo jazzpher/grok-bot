@@ -3,6 +3,7 @@
     python -m grokbot chat                 # interactive terminal agent in the current directory
     python -m grokbot exec "fix the tests" # non-interactive: runs one turn, prints the answer, exit code 0/1
     python -m grokbot serve --port 5000    # the Flask web UI (same as python webui.py)
+    python -m grokbot telegram             # Telegram gateway only (GROK_TELEGRAM_TOKEN + GROK_TELEGRAM_ALLOWED_IDS)
 
 Provider settings come from the environment: GROK_API_KEY, GROK_API_URL (OpenAI-compatible chat URL),
 GROK_MODEL. Sandbox policy flags mirror the web UI (--sandbox, --approval, --network).
@@ -13,6 +14,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import threading
 from pathlib import Path
 
@@ -86,7 +88,27 @@ class Printer:
 
     def __call__(self, event):
         kind = event['type']
-        if kind == 'text':
+        if event.get('agent') and kind not in ('subagent_start', 'subagent_end'):
+            return self._subagent(event)
+        if kind == 'context_info' and self.verbose:
+            bits = []
+            if event.get('memories'):
+                bits.append('%d memories' % len(event['memories']))
+            if event.get('skills'):
+                bits.append('%d skills' % len(event['skills']))
+            if event.get('project_file'):
+                bits.append(event['project_file'])
+            if event.get('mcp'):
+                bits.append('MCP: ' + ', '.join(event['mcp']))
+            if bits:
+                self.out.write('· context: %s · %d tools\n' % (' · '.join(bits), event.get('tools', 0)))
+        elif kind == 'subagent_start':
+            self._break(); self.out.write('┌ %s: %s\n' % (event.get('agent'), (event.get('task') or '')[:100]))
+        elif kind == 'subagent_end':
+            self._break(); self.out.write('└ %s %s (%s steps, %s tool calls)\n' % (event.get('agent'), event.get('status'), event.get('steps'), event.get('tool_calls')))
+        elif kind == 'memory_saved':
+            self._break(); self.out.write('· remembered: %s\n' % event.get('text'))
+        elif kind == 'text':
             self.out.write(event['delta']); self.out.flush(); self.in_text = True
         elif kind == 'reasoning' and self.verbose:
             pass
@@ -110,6 +132,20 @@ class Printer:
             self._break(); self.out.write('error: %s\n' % event['text'])
         elif kind == 'done':
             self._break()
+
+    def _subagent(self, event):
+        """Nested sub-agent events: indented, tools only (its text becomes the delegate tool result)."""
+        if not self.verbose:
+            return
+        kind = event['type']
+        if kind == 'tool_start':
+            args = event.get('arguments') or {}
+            label = args.get('command') or args.get('path') or args.get('query') or args.get('url') or json.dumps(args)[:100]
+            self.out.write('│ ▸ %s %s\n' % (event['name'], label))
+        elif kind == 'tool_end':
+            self.out.write('│ %s %s (%.1fs)\n' % ('✓' if event.get('ok') else '✗', event['name'], event.get('duration', 0)))
+        elif kind in ('status', 'error'):
+            self.out.write('│ · %s\n' % event.get('text'))
 
     def _break(self):
         if self.in_text:
@@ -201,7 +237,41 @@ def cmd_serve(args):
     webui.app.config.update(MOCK=args.mock, MODEL=args.model or webui.DEFAULT_MODEL)
     if args.key:
         webui.app.config['API_KEY'] = args.key
+    webui.scheduler().start()
+    webui.mcp_manager()
+    try:
+        webui.start_telegram()
+    except ValueError as exc:
+        print('Telegram gateway not started: %s' % exc, file=sys.stderr)
     webui.app.run(host=args.host, port=args.port, threaded=True)
+
+
+def cmd_telegram(args):
+    """Telegram-only mode: no HTTP server, same agent/memory/skills/schedules (owner `tg:<chat_id>`)."""
+    import webui
+    webui.app.config.update(MOCK=args.mock, MODEL=args.model or webui.DEFAULT_MODEL)
+    if args.key:
+        webui.app.config['API_KEY'] = args.key
+    if args.token:
+        config.TELEGRAM_TOKEN = args.token
+    if args.allow:
+        config.TELEGRAM_ALLOWED_IDS = {x.strip() for x in args.allow.split(',') if x.strip()}
+    try:
+        gateway = webui.start_telegram()
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    if gateway is None:
+        print('Set GROK_TELEGRAM_TOKEN (or --token) and GROK_TELEGRAM_ALLOWED_IDS (or --allow).', file=sys.stderr)
+        return 2
+    webui.scheduler().start()
+    print('Telegram gateway running for %d allowed id(s). Ctrl-C to stop.' % len(gateway.allowed))
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        gateway.stop()
+    return 0
 
 
 def main(argv=None):
@@ -233,6 +303,12 @@ def main(argv=None):
     p_serve.add_argument('--model')
     p_serve.add_argument('--key')
     p_serve.add_argument('--mock', action='store_true')
+    p_tg = sub.add_parser('telegram', help='run only the Telegram gateway (no web server)')
+    p_tg.add_argument('--token', help='bot token (default: GROK_TELEGRAM_TOKEN)')
+    p_tg.add_argument('--allow', help='comma-separated Telegram user ids allowed to talk to the bot (default: GROK_TELEGRAM_ALLOWED_IDS)')
+    p_tg.add_argument('--model')
+    p_tg.add_argument('--key')
+    p_tg.add_argument('--mock', action='store_true')
     args = parser.parse_args(argv)
     if args.command == 'exec':
         return cmd_exec(args)
@@ -240,6 +316,8 @@ def main(argv=None):
         return cmd_chat(args)
     if args.command == 'serve':
         return cmd_serve(args)
+    if args.command == 'telegram':
+        return cmd_telegram(args)
     parser.print_help()
     return 0
 
