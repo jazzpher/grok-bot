@@ -6,7 +6,23 @@ import operator
 import pathlib
 import re
 from skills import SkillStore
-from documents import build_docx, extract_text, docx_paragraphs
+
+
+# documents pulls in pypdf; import it only when a .docx is actually handled.
+def build_docx(text):
+    import documents
+    return documents.build_docx(text)
+
+
+def extract_text(name, raw):
+    import documents
+    return documents.extract_text(name, raw)
+
+
+def docx_paragraphs(text):
+    import documents
+    return documents.docx_paragraphs(text)
+
 
 RULES = '''You are a task assistant. Work on the user's goal using the tools below.
 Plan, act, inspect the result, and repeat. Reply ONLY with a JSON object.
