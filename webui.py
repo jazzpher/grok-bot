@@ -39,95 +39,164 @@ PAGE = r"""<!doctype html>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
-  body { margin: 0; font-family: system-ui, sans-serif; background: #0d0f12; color: #e8eaed;
-         display: flex; flex-direction: column; height: 100vh; }
-  header { display: flex; align-items: center; justify-content: space-between;
-           padding: 10px 16px; border-bottom: 1px solid #22262c; }
-  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
-  header button { background: #1c2026; color: #e8eaed; border: 1px solid #2a2f36;
-                  border-radius: 8px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
-  header button:hover { background: #242a31; }
-  #chat { flex: 1; overflow-y: auto; padding: 16px; display: flex;
-          flex-direction: column; gap: 12px; }
-  .msg { max-width: 78%; padding: 10px 14px; border-radius: 14px; white-space: pre-wrap;
-         line-height: 1.5; font-size: 15px; }
-  .you { align-self: flex-end; background: #24486b; border-bottom-right-radius: 4px; }
-  .grok { align-self: flex-start; background: #1a1e24; border: 1px solid #262b32;
-          border-bottom-left-radius: 4px; }
-  #bar { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid #22262c; }
-  #in { flex: 1; background: #1a1e24; color: #e8eaed; border: 1px solid #2a2f36;
-        border-radius: 12px; padding: 12px 14px; font-size: 15px; resize: none;
-        font-family: inherit; }
-  #in:focus { outline: none; border-color: #3d7bd9; }
-  #send { background: #2f6fdb; color: #fff; border: 0; border-radius: 12px;
-          padding: 0 20px; font-size: 15px; cursor: pointer; }
-  #send:disabled { background: #24314a; cursor: default; }
-  .hint { text-align: center; color: #6b7280; font-size: 13px; padding: 8px; }
-  #settings { display: none; padding: 10px 16px; border-bottom: 1px solid #22262c;
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+         background: #0e1114; color: #e6e9ec; height: 100dvh; overflow: hidden; }
+  button { font-family: inherit; }
+  #app { display: flex; height: 100dvh; }
+  #sidebar { width: 232px; flex: none; background: #10141a; border-right: 1px solid #1e242c;
+             display: flex; flex-direction: column; padding: 10px 8px; overflow-y: auto; }
+  .brand { font-size: 15px; font-weight: 650; letter-spacing: -.2px; padding: 4px 10px 12px; }
+  .side-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+               background: transparent; border: 0; color: #d6dbe1; font-size: 12.5px;
+               padding: 7px 10px; border-radius: 8px; cursor: pointer; }
+  .side-item:hover { background: #1a2027; }
+  .side-item.primary { color: #4cc38a; font-weight: 600; }
+  .side-label { font-size: 10px; letter-spacing: 1px; text-transform: uppercase;
+                color: #6b7480; padding: 14px 10px 4px; }
+  .side-note { font-size: 10.5px; color: #5b636d; padding: 0 10px 6px; }
+  #taskselect { width: calc(100% - 4px); margin: 2px; background: #151a21; color: #d6dbe1;
+                border: 1px solid #242c35; border-radius: 8px; padding: 6px 8px; font-size: 11px; }
+  .side-foot { margin-top: auto; padding: 10px 10px 2px; font-size: 10.5px; color: #5b636d; }
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #topbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+            border-bottom: 1px solid #1c222a; }
+  #menu { display: none; background: transparent; border: 0; color: #d6dbe1; font-size: 16px;
+          cursor: pointer; padding: 2px 6px; }
+  #crumb { font-size: 12px; color: #8b949c; }
+  #status { margin-left: auto; color: #6b7480; font-size: 11px; }
+  #settings { display: none; padding: 10px 16px; border-bottom: 1px solid #1c222a;
               flex-wrap: wrap; gap: 8px; align-items: center; }
   #settings.open { display: flex; }
-  #settings input { background: #1a1e24; color: #e8eaed; border: 1px solid #2a2f36;
-                    border-radius: 8px; padding: 8px 10px; font-size: 13px; flex: 1;
-                    min-width: 160px; }
-  #settings input:focus { outline: none; border-color: #3d7bd9; }
-  #settings button { background: #1c2026; color: #e8eaed; border: 1px solid #2a2f36;
-                     border-radius: 8px; padding: 8px 12px; cursor: pointer; font-size: 13px; }
-  #keystatus { color: #6b7280; font-size: 12px; }
+  #settings input { background: #10151b; color: #e6e9ec; border: 1px solid #242c35;
+                    border-radius: 8px; padding: 8px 10px; font-size: 12px; flex: 1; min-width: 150px; }
+  #settings input:focus { outline: none; border-color: #4cc38a; }
+  #settings button { background: #1a2027; color: #d6dbe1; border: 1px solid #242c35;
+                     border-radius: 8px; padding: 8px 12px; cursor: pointer; font-size: 12px; }
+  #keystatus { color: #6b7480; font-size: 11px; }
+  #skillsPanel { padding: 12px 16px; border-bottom: 1px solid #1c222a; max-height: 55vh;
+                 overflow: auto; font-size: 12px; }
+  #skillsPanel p { color: #8b949c; font-size: 11px; margin: 6px 0; }
+  #skillsPanel input, #skillsPanel select, #skillsPanel textarea {
+    background: #10151b; color: #e6e9ec; border: 1px solid #242c35; border-radius: 8px;
+    padding: 7px 9px; font-size: 12px; }
+  #skillsPanel button { background: #1a2027; color: #d6dbe1; border: 1px solid #242c35;
+                        border-radius: 8px; padding: 6px 10px; cursor: pointer; font-size: 11.5px; }
+  #skillstatus { color: #6b7480; font-size: 11px; margin-left: 8px; }
+  #chatwrap { flex: 1; overflow-y: auto; }
+  #chat { max-width: 860px; margin: 0 auto; padding: 14px 6px 6px; display: flex;
+          flex-direction: column; gap: 4px; }
+  .msg { width: 100%; white-space: pre-wrap; line-height: 1.55; font-size: 13px;
+         padding: 7px 12px; border-radius: 8px; word-break: break-word; }
+  .you { background: #1b2735; }
+  .grok { background: transparent; }
+  .tasklog { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+             font-size: 11px; line-height: 1.5; color: #9aa4ae; background: #10151b;
+             border: 1px solid #20272f; margin: 4px 0; }
+  .tasklog.done { max-height: 40px; overflow: hidden; cursor: pointer; position: relative; }
+  .tasklog.done:not(.open)::after { content: "click to expand"; position: absolute; right: 8px;
+             bottom: 3px; color: #4cc38a; background: #10151b; padding-left: 8px; font-size: 10px; }
+  .tasklog.done.open { max-height: none; }
+  .hint { text-align: center; color: #6b7480; font-size: 11px; padding: 16px 8px; }
+  .chip { display: inline-block; background: #151a21; border: 1px solid #242c35;
+          border-radius: 6px; padding: 3px 8px; margin: 2px 4px 2px 0; font-size: 11px;
+          color: #9ac6ff; text-decoration: none; }
+  #bar { padding: 8px 6px calc(8px + env(safe-area-inset-bottom)); }
+  #composer { max-width: 860px; margin: 0 auto; background: #141a21; border: 1px solid #28313c;
+              border-radius: 14px; padding: 4px 10px 6px; }
+  #composer:focus-within { border-color: #3a4552; }
+  #in { width: 100%; background: transparent; border: 0; color: #e6e9ec; font-size: 16px;
+        resize: none; font-family: inherit; padding: 8px 2px 4px; max-height: 140px; }
+  #in:focus { outline: none; }
+  #composer-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .tool { background: transparent; border: 0; color: #8b949c; font-size: 11.5px; cursor: pointer;
+          padding: 5px 7px; border-radius: 6px; }
+  .tool:hover { background: #1c232c; color: #e6e9ec; }
+  #mode { background: transparent; color: #8b949c; border: 0; font-size: 11.5px; cursor: pointer; }
+  #checks { flex: 1; min-width: 120px; display: none; background: #10151b;
+            border: 1px solid #242c35; color: #9aa4ae; border-radius: 6px;
+            padding: 5px 7px; font-size: 10.5px; }
+  #composer.taskmode #checks { display: block; }
+  #stop:disabled { opacity: .35; cursor: default; }
+  #send { margin-left: auto; width: 30px; height: 30px; flex: none; border-radius: 50%; border: 0;
+          cursor: pointer; background: #4cc38a; color: #052e1e; font-size: 14px; font-weight: 700; }
+  #send:disabled { background: #242c35; color: #6b7480; cursor: default; }
+  @media (max-width: 720px) {
+    #menu { display: block; }
+    #sidebar { position: fixed; z-index: 20; top: 0; bottom: 0; left: 0;
+               transform: translateX(-100%); transition: transform .15s ease; }
+    #sidebar.open { transform: none; box-shadow: 0 0 48px #000c; }
+    #chat { padding: 12px 12px 6px; }
+    .msg { font-size: 10px; padding: 6px 10px; }
+    .tasklog { font-size: 9.5px; }
+    #bar { padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); }
+  }
 </style>
 </head>
 <body>
-<header>
-  <h1>grok-bot</h1>
-  <div>
-    <button onclick="toggleSkills()">Skills</button>
-    <button onclick="toggleSettings()">Settings</button>
-    <button onclick="clearChat()">New chat</button>
+<div id="app">
+<aside id="sidebar">
+  <div class="brand">grok-bot</div>
+  <button class="side-item primary" onclick="clearChat()">+ New session</button>
+  <button class="side-item" onclick="toggleSkills()">Capabilities</button>
+  <button class="side-item" onclick="showFiles()">Artifacts</button>
+  <button class="side-item" onclick="toggleSettings()">Settings</button>
+  <div class="side-label">Tasks</div>
+  <div class="side-note">Saved task-loop runs</div>
+  <select id="taskselect" aria-label="Saved task"></select>
+  <button class="side-item" onclick="resumeTask()">Resume selected task</button>
+  <div class="side-foot">Runs locally · free models only</div>
+</aside>
+<main>
+  <div id="topbar">
+    <button id="menu" onclick="toggleSidebar()" aria-label="Open menu">☰</button>
+    <span id="crumb">Chat</span>
+    <span id="status" role="status" aria-live="polite">Ready</span>
   </div>
-</header>
-<div id="settings">
-  <input id="keyin" type="password" placeholder="API key (Gemini, Grok, ...)" autocomplete="off">
-  <input id="urlin" placeholder="API URL (optional, blank = auto)" autocomplete="off">
-  <input id="modelin" placeholder="Model (optional, blank = auto)" autocomplete="off">
-  <button onclick="saveKey()">Save</button>
-  <span id="keystatus"></span>
-</div>
-<div style="padding:8px 16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-<label>Mode <select id="mode"><option value="chat">Chat</option><option value="task">Task loop</option></select></label>
-<button id="stop" onclick="stopTask()" disabled>Stop</button>
-<button onclick="resumeTask()">Resume selected task</button>
-<select id="taskselect" aria-label="Saved task"></select>
-<input id="checks" aria-label="Artifact checks JSON" placeholder='Checks JSON (also Resume if missing): [{"type":"file_text","path":"out.txt","text":"hello"}]' style="max-width:360px;width:100%">
-<button onclick="showFiles()">Workspace files</button>
-<label style="background:#1c2026;padding:4px 8px;border-radius:6px;cursor:pointer;display:flex;gap:6px;align-items:center">Upload file<input id="upload" type="file" style="max-width:160px" aria-label="Upload document" accept=".txt,.md,.csv,.json,.py,.js,.html,.css,.pdf,.docx" onchange="uploadFile(this)"></label>
-<span id="status" role="status" aria-live="polite">Ready</span>
-</div>
-<section id="skillsPanel" hidden style="padding:12px 16px;border-block:1px solid #333;max-height:55vh;overflow:auto">
-<strong>Saved skills</strong>
-<p>Reusable workflows, private to this browser session. Max 500 non-archived skills, 12 KB each. Archives do not use a slot; restoring needs a free slot. Task loop can save and load them. No background model calls; skill actions use normal task steps. New chat keeps skills. Agent-created skills become stale after 14 unused days and archive after 30; pinned, manually created and legacy skills are never auto-archived. Archived files remain on disk and can be restored.</p>
-<select id="skillselect" aria-label="Saved skill" onchange="loadSkill()"><option value="">New skill</option></select>
-<button onclick="refreshSkills()">Refresh</button>
-<button onclick="newSkill()">New skill</button>
-<div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0">
-<input id="skillname" aria-label="Skill name" placeholder="skill-name" maxlength="64">
-<input id="skilldescription" aria-label="Skill description" placeholder="When to use it" maxlength="160" style="flex:1;min-width:180px">
-</div>
-<textarea id="skillcontent" aria-label="Skill Markdown" rows="8" style="width:100%;background:#1a1e24;color:#e8eaed;padding:8px" placeholder="## When to use
+  <div id="settings">
+    <input id="keyin" type="password" placeholder="API key (Gemini, Grok, ...)" autocomplete="off">
+    <input id="urlin" placeholder="API URL (optional, blank = auto)" autocomplete="off">
+    <input id="modelin" placeholder="Model (optional, blank = auto)" autocomplete="off">
+    <button onclick="saveKey()">Save</button>
+    <span id="keystatus"></span>
+  </div>
+  <section id="skillsPanel" hidden>
+    <strong>Saved skills</strong>
+    <p>Reusable workflows, private to this browser session. Max 500 non-archived skills, 12 KB each. Archives do not use a slot; restoring needs a free slot. Task loop can save and load them. No background model calls; skill actions use normal task steps. New chat keeps skills. Agent-created skills become stale after 14 unused days and archive after 30; pinned, manually created and legacy skills are never auto-archived. Archived files remain on disk and can be restored.</p>
+    <select id="skillselect" aria-label="Saved skill" onchange="loadSkill()"><option value="">New skill</option></select>
+    <button onclick="refreshSkills()">Refresh</button>
+    <button onclick="newSkill()">New skill</button>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0">
+      <input id="skillname" aria-label="Skill name" placeholder="skill-name" maxlength="64">
+      <input id="skilldescription" aria-label="Skill description" placeholder="When to use it" maxlength="160" style="flex:1;min-width:180px">
+    </div>
+    <textarea id="skillcontent" aria-label="Skill Markdown" rows="8" style="width:100%" placeholder="## When to use
 ## Steps
 ## Pitfalls
 ## Verification"></textarea>
-<button onclick="saveSkill()">Save skill</button>
-<button onclick="restoreSkill()">Restore selected skill</button>
-<button onclick="togglePinSkill()">Pin / unpin selected skill</button>
-<button onclick="deleteSkill()">Delete selected skill</button>
-<span id="skillstatus" role="status" aria-live="polite"></span>
-</section>
-<div id="chat"><div class="hint">Chat or run a task. Tasks can calculate and read/write small workspace files. No browsing or computer control.</div></div>
-<div id="bar">
-  <textarea id="in" rows="1" placeholder="Message grok-bot..." autofocus></textarea>
-  <button id="send" onclick="send()">Send</button>
+    <button onclick="saveSkill()">Save skill</button>
+    <button onclick="restoreSkill()">Restore selected skill</button>
+    <button onclick="togglePinSkill()">Pin / unpin selected skill</button>
+    <button onclick="deleteSkill()">Delete selected skill</button>
+    <span id="skillstatus" role="status" aria-live="polite"></span>
+  </section>
+  <div id="chatwrap"><div id="chat"><div class="hint">Chat or run a task. Tasks can calculate and read/write small workspace files. No browsing or computer control.</div></div></div>
+  <div id="bar">
+    <div id="composer">
+      <textarea id="in" rows="1" placeholder="Start with a goal" autofocus></textarea>
+      <div id="composer-row">
+        <label class="tool" title="Upload file">+ <input id="upload" type="file" style="display:none" aria-label="Upload document" accept=".txt,.md,.csv,.json,.py,.js,.html,.css,.pdf,.docx" onchange="uploadFile(this)"></label>
+        <select id="mode" title="Mode"><option value="chat">Chat</option><option value="task">Task loop</option></select>
+        <input id="checks" aria-label="Artifact checks JSON" placeholder='Checks JSON: [{"type":"file_text","path":"out.txt","text":"hello"}]'>
+        <button id="stop" class="tool" onclick="stopTask()" disabled>■ Stop</button>
+        <button id="send" onclick="send()" title="Send" aria-label="Send">↑</button>
+      </div>
+    </div>
+  </div>
+</main>
 </div>
 <script>
 const chat = document.getElementById('chat');
+const wrap = document.getElementById('chatwrap');
 const inp = document.getElementById('in');
 const sendBtn = document.getElementById('send');
 let skillRevision = '';
@@ -200,13 +269,14 @@ async function deleteSkill() {
   } catch(e) {document.getElementById('skillstatus').textContent = e.message;}
 }
 
+function scrollChat() { wrap.scrollTop = wrap.scrollHeight; }
 
 function add(cls, text) {
   const d = document.createElement('div');
   d.className = 'msg ' + cls;
   d.textContent = text;
   chat.appendChild(d);
-  chat.scrollTop = chat.scrollHeight;
+  scrollChat();
   return d;
 }
 
@@ -249,7 +319,7 @@ async function send() {
           bubble.textContent = full;
         }
       } else { full += chunk; bubble.textContent = full; }
-      chat.scrollTop = chat.scrollHeight;
+      scrollChat();
     }
     if (!full) bubble.textContent = '[Empty reply]';
     if (!isTask) status.textContent = 'Ready';
@@ -278,10 +348,18 @@ const taskViews = new Map();
 function taskBubble(id, bubble) {
   let view = taskViews.get(id);
   if (!view || view.bubble.isConnected === false) {
-    view = {bubble: bubble || add('grok', 'Saved task\n'), after: 0};
+    view = {bubble: bubble || add('grok tasklog', 'Saved task\n'), after: 0};
     taskViews.set(id, view);
   }
   return view;
+}
+function collapseLog(bubble) {
+  if (!bubble.classList) return;
+  bubble.classList.add('done');
+  if (!bubble.collapseBound && bubble.addEventListener) {
+    bubble.collapseBound = true;
+    bubble.addEventListener('click', () => bubble.classList.toggle('open'));
+  }
 }
 async function showSelectedTask() {
   const id = document.getElementById('taskselect').value;
@@ -317,6 +395,7 @@ async function watchTask(id, bubble) {
           }
           if (finalEvents.length < 200) break;
         }
+        collapseLog(bubble);
         break;
       }
       await new Promise(resolve => setTimeout(resolve, 500));
@@ -387,14 +466,20 @@ async function showFiles() {
   if (!res.ok) { document.getElementById('status').textContent = 'Could not list files'; return; }
   const names = await res.json(); const bubble = add('grok', names.length ? 'Workspace files:\n' : 'No workspace files yet.');
   for (const name of names) {
-    const link = document.createElement('a'); link.textContent = name;
+    const link = document.createElement('a'); link.textContent = name; link.className = 'chip';
     link.href = '/files/' + name.split('/').map(encodeURIComponent).join('/');
-    link.style.color = '#9ac6ff'; bubble.appendChild(link); bubble.appendChild(document.createElement('br'));
+    bubble.appendChild(link);
   }
+  scrollChat();
 }
 
 function toggleSettings() {
   document.getElementById('settings').classList.toggle('open');
+}
+
+function toggleSidebar() {
+  const side = document.getElementById('sidebar');
+  if (side.classList) side.classList.toggle('open');
 }
 
 async function saveKey() {
@@ -412,14 +497,23 @@ async function clearChat() {
   const res = await fetch('/clear', {method: 'POST'});
   if (!res.ok) { document.getElementById('status').textContent = await res.text(); return; }
   chat.innerHTML = '<div class="hint">New chat. Memory cleared.</div>';
+  taskViews.clear();
+  const side = document.getElementById('sidebar');
+  if (side.classList && side.classList.contains('open')) side.classList.remove('open');
 }
 
+document.getElementById('mode').addEventListener('change', () => {
+  document.getElementById('composer').classList.toggle('taskmode', document.getElementById('mode').value === 'task');
+});
+
+inp.addEventListener('input', () => { inp.style.height = 'auto'; inp.style.height = Math.min(inp.scrollHeight, 140) + 'px'; });
 inp.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 });
 </script>
 </body>
-</html>"""
+</html>
+"""
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('GROK_SESSION_SECRET') or secrets.token_hex(32)
