@@ -44,6 +44,39 @@ silently switch to other models or a mock answer.
 
 ## What tasks can actually do
 
+### User-aligned drafts and honest verification
+
+Put your goal in the message box and optionally use **Generation requirements**
+for language, format, content, audience and tone, for example:
+`Tagalog; warm invitation; numbered list; include December 1 and the venue; DOCX`.
+These are generation instructions, not a deterministic guarantee of model quality.
+They and the original goal, explicit checks and resume answers survive compaction
+and restart. Missing essential details should produce a targeted question; ordinary
+style preferences should not require a generic verification dead end.
+
+DOCX creation checks that a candidate reopens and its extracted text equals the
+tool input before atomic replacement. A failed build/check/replace preserves the
+existing file. This checks file integrity, not whether the model wrote the right
+invitation. With no explicit checks, a task that wrote only .docx files completes
+once the harness reopens each file and finds text. The result says only that was
+verified (language, content and style were not independently checked), and the
+download stays available. Add a file_text check for exact-text verification.
+
+`file_text` for DOCX now means the **entire extracted body text equals expected
+text**, not substring matching (compatibility change). Paragraphs, including blank
+ones and table-cell paragraphs, are joined with `\n`; `# ` heading markers used by
+write_docx are removed. There is no whitespace/case normalization. Headers,
+footers, visual layout and language detection are not checked. Text files still
+use exact UTF-8 bytes; `exact_copy` still uses byte equality. No `contains` check
+or semantic model verdict is introduced. Example:
+`[{"type":"file_text","path":"invite.docx","text":"Paanyaya\nKumusta!"}]`.
+
+`budgets.steps` caps valid action steps. Invalid replies do not use a step; they
+have a separate cap of 5 per task, then the task is `blocked` (Resume works). The
+persisted `attempts` counter is informational (provider calls made). Self-review is advisory within
+this same budget, with no hidden extra requests. Live generated-answer quality,
+native Windows and physical mobile/browser rendering were not tested in this upgrade.
+
 - Calculate arithmetic with +, -, *, /, // and %.
 - List, read and write small UTF-8 files in this session's workspace.
 - Read back written files before saying the task is done.
@@ -74,8 +107,8 @@ end-to-end deadline.
 Tasks survive HTTP disconnects. Restart interrupts active tasks until explicit
 Resume; counters/checkpoints are restored without blindly replaying writes.
 Saved task selection restores paused questions and completed results on reload
-and selector changes. Model final answers appear as `result` only after explicit
-artifact checks pass, separately from the verifier message. If checks were empty,
+and selector changes. Deterministic evidence summaries appear as `result` only after explicit
+artifact checks pass; model self-certification is not published as verified proof. If checks were empty,
 fill the checks JSON field before Resume; existing checks remain immutable.
 The single-process database guard supports Unix and Windows locking. The test
 suite runs on native Windows, but that does not certify production deployment.

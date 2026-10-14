@@ -118,7 +118,7 @@ class HarnessTests(unittest.TestCase):
     def test_explicit_docx_text_check(self):
         replies = [act('write_docx', path='l.docx', content=LETTER), act('done', text='ok')]
         it = iter(replies)
-        tid = self.m.submit('alice', 'g', [], lambda _m: next(it), checks=[{'type': 'file_text', 'path': 'l.docx', 'text': 'Dear Ms. Lena Okafor,'}])
+        tid = self.m.submit('alice', 'g', [], lambda _m: next(it), checks=[{'type': 'file_text', 'path': 'l.docx', 'text': extract_text('l.docx', build_docx(LETTER))}])
         end = time.monotonic() + 5
         while self.m.get(tid, 'alice')['status'] in ('queued', 'running') and time.monotonic() < end:
             time.sleep(.01)

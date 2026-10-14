@@ -5,6 +5,8 @@ import math
 import operator
 import pathlib
 import re
+import os
+import tempfile
 from skills import SkillStore
 
 
@@ -26,6 +28,15 @@ def docx_paragraphs(text):
 
 RULES = '''You are a task assistant. Work on the user's goal using the tools below.
 Plan, act, inspect the result, and repeat. Reply ONLY with a JSON object.
+Follow the current user's requested language, content, format, audience and tone
+in the artifact and final answer; do not assume another user's preferences.
+Separate generation requirements/preferences from deterministic acceptance checks.
+Before done, review your output against every supplied requirement. Self-review
+is advisory, not independent proof. A readable file or matching generated input
+does not prove relevance, language, factual accuracy, style or all requirements.
+If essential details conflict or are missing, ask a specific question with
+need_input; otherwise use sensible stated assumptions and produce a reviewable
+draft. Never claim all requirements were verified by structural checks alone.
 Include action, text, path, source_path, content and expression in every reply;
 use empty strings for unused fields. Never omit a required tool argument.
 Choices:
@@ -225,22 +236,20 @@ class Workspace:
             data = build_docx(content)
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
-        self._write_bytes(name, data, allow_upload)
         path = self.path(name)
         rel = path.relative_to(self.root).as_posix()
-        # Harness-side check: reopen the saved file as a DOCX and compare its text.
-        try:
-            got = extract_text(path.name, path.read_bytes())
-        except Exception as exc:
-            path.unlink(missing_ok=True); self.written.discard(rel)
-            raise ToolError('Saved .docx failed to open (' + type(exc).__name__ + '); nothing kept.') from exc
-        if got != '\n'.join(docx_paragraphs(content)):
-            path.unlink(missing_ok=True); self.written.discard(rel)
-            raise ToolError('Saved .docx text did not match the input; nothing kept. Try again with plain text.')
+        def validate(candidate):
+            try:
+                got = extract_text(path.name, candidate.read_bytes())
+            except Exception as exc:
+                raise ToolError('Candidate .docx failed to open; original preserved.') from exc
+            if got != '\n'.join(docx_paragraphs(content)):
+                raise ToolError('Candidate .docx text did not match input; original preserved. Try plain text.')
+        self._write_bytes(name, data, allow_upload, validate)
         self.checked.add(rel)
-        return 'Wrote ' + rel + ' as a real Word document. Verified: it opens as DOCX and its text matches (' + str(len(got.splitlines())) + ' lines). It is offered as a download.'
+        return 'Wrote ' + rel + ' as a real Word document. Verified: opens as DOCX and extracted text matches tool input. User requirements/content quality are unverified. Offered as a download.'
 
-    def _write_bytes(self, name, content, allow_upload=False):
+    def _write_bytes(self, name, content, allow_upload=False, validate=None):
         if is_upload_path(name) and not allow_upload:
             raise ToolError('Uploaded documents are read-only. Write a separate output file.')
         path = self.path(name)
@@ -256,8 +265,20 @@ class Workspace:
         if used - old + len(content) > 256000:
             raise ToolError('Workspace storage limit reached (256 KB).')
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content)
-        path.chmod(0o600)
+        candidate = None
+        try:
+            with tempfile.NamedTemporaryFile(prefix='.artifact-', dir=path.parent, delete=False) as f:
+                candidate = pathlib.Path(f.name)
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            candidate.chmod(0o600)
+            if validate:
+                validate(candidate)
+            os.replace(candidate, path)
+        finally:
+            if candidate is not None:
+                candidate.unlink(missing_ok=True)
         name = path.relative_to(self.root).as_posix()
         self.written.add(name)
         self.checked.discard(name)

@@ -186,7 +186,9 @@ class TaskManager:
                         or is_upload_path(target.relative_to(workspace.root))):
                     raise ValueError('Copy target must be separate and writable.')
 
-    def submit(self, owner, goal, history, call_model, checks=None, budgets=None):
+    def submit(self, owner, goal, history, call_model, checks=None, budgets=None, requirements=''):
+        if not isinstance(requirements, str) or len(requirements.encode('utf-8')) > 8000:
+            raise ValueError('Requirements must be text up to 8 KB; include language, format, content and style.')
         if not isinstance(owner, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', owner):
             raise ValueError('Invalid session identifier.')
         workspace = Workspace(self.workspaces / owner)
@@ -207,7 +209,7 @@ class TaskManager:
         tid = secrets.token_hex(16)
         context_rules = '\n'.join(m['content'] for m in history if m.get('role') == 'system')
         past = [m for m in history if m.get('role') != 'system'][-24:]
-        state = {'steps': 0, 'messages': [{'role': 'system', 'content': context_rules + '\n' + workspace.skills.index_context(goal) + '\n' + RULES},
+        state = {'steps': 0, 'attempts': 0, 'requirements': requirements, 'messages': [{'role': 'system', 'content': context_rules + '\n' + workspace.skills.index_context(goal) + '\n' + RULES},
                   *past, {'role': 'user', 'content': goal}], 'written': [], 'checked': [],
                  'pending': None, 'budgets': limits, 'elapsed': 0, 'output': 0, 'retry_streak': 0,
                  'failure_signature': None, 'failure_count': 0}
@@ -258,6 +260,10 @@ class TaskManager:
                     raise ValueError('Supply nonempty file_text or exact_copy checks in the checks field.')
             state = row['state']
             if answer:
+                clarification = state.get('clarification', '') + '\n' + answer
+                if len(clarification.encode('utf-8')) > 12000:
+                    raise ValueError('Cumulative clarification limit is 12 KB; start a new task with consolidated requirements.')
+                state['clarification'] = clarification
                 state['messages'].append({'role': 'user', 'content': answer})
             with self.db:
                 if checks is not None and not row['checks']:
@@ -298,6 +304,8 @@ class TaskManager:
         self.save(tid, 'running', state, {'type': 'reconciled', 'text': 'Recovered interrupted action without replay.'})
 
     def _verify(self, row, state, workspace):
+        if workspace.written - workspace.checked:
+            return 'check', 'Read these written files first: ' + ', '.join(sorted(workspace.written - workspace.checked))
         if not row['checks']:
             docs = sorted(workspace.written)
             if docs and all(n.lower().endswith('.docx') for n in docs) and not workspace.written - workspace.checked:
@@ -309,10 +317,8 @@ class TaskManager:
                             return 'check', 'Word document is missing or has no text: ' + n
                     except Exception:
                         return 'check', 'Word document failed to open as DOCX: ' + n
-                return 'completed', 'Word document(s) reopened as DOCX with text present: ' + ', '.join(docs)
-            return 'needs_input', 'Supply explicit file_text or exact_copy checks; no generic semantic verifier is available.'
-        if workspace.written - workspace.checked:
-            return 'check', 'Read these written files first: ' + ', '.join(sorted(workspace.written - workspace.checked))
+                return 'completed', 'Word document(s) reopened as DOCX with text present: ' + ', '.join(docs) + '. Only that was verified; language, content and style were not independently checked, so review the download.'
+            return 'needs_input', ('Artifact-created/content-unverified: read-back checked for ' + ', '.join(docs) + '. ' if docs else 'Content-unverified: ') + 'No deterministic acceptance checks supplied. Review the draft/downloads, or specify the output path and full expected text (file_text), or source/target paths (exact_copy). What specific content or format needs revision?'
         for c in row['checks']:
             p = workspace.path(c['path'])
             if not p.is_file() or p.stat().st_size > 32000:
@@ -323,7 +329,7 @@ class TaskManager:
                     got = extract_text(p.name, p.read_bytes())
                 except Exception:
                     return 'check', 'Artifact is not a valid DOCX: ' + c['path']
-                if c.get('text', '') not in got:
+                if c.get('text', '') != got:
                     return 'check', 'Artifact verification failed: ' + c['path']
                 continue
             if c['type'] == 'exact_copy':
@@ -333,11 +339,12 @@ class TaskManager:
                 expected = s.read_bytes()
             if p.read_bytes() != expected:
                 return 'check', 'Artifact verification failed: ' + c['path']
-        return 'completed', 'Explicit artifact checks passed.'
+        return 'completed', 'Explicit artifact checks passed: ' + json.dumps(row['checks'], ensure_ascii=False) + '. Only these checks were verified; language, style, relevance and factual quality are not independently verified.'
 
     def _run(self, tid, owner, call_model):
         row = self.get(tid, owner)
         state = row['state']
+        state.setdefault('attempts', state['steps'] + state.get('invalid', 0))
         started = time.monotonic()
         elapsed_before = state['elapsed']
         def finish(status, text):
@@ -362,11 +369,12 @@ class TaskManager:
                     finish('stopped', 'Stopped by you.'); return
                 if over_budget():
                     finish('budget_exhausted', 'Elapsed/output budget exhausted.'); return
-                context = self._context(tid, state, row['goal'])
+                context = self._context(tid, state, row['goal'], row['checks'])
                 if context is None:
                     finish('budget_exhausted', 'Original goal and rules exceed context budget.'); return
                 state['steps'] += 1
-                self.save(tid, 'running', state, {'type': 'progress', 'text': 'Requesting next action', 'step': state['steps']})
+                state['attempts'] += 1
+                self.save(tid, 'running', state, {'type': 'progress', 'text': 'Requesting next action', 'step': state['steps'], 'attempt': state['attempts']})
                 try:
                     remaining_output = state['budgets']['output'] - state['output']
                     raw = self._call_model(call_model, context, remaining_output)
@@ -413,9 +421,9 @@ class TaskManager:
                     status, text = self._verify(row, state, workspace)
                     if status != 'check':
                         state['elapsed'] = elapsed_before + time.monotonic() - started
-                        # Publish the model answer only after artifact verification.
-                        # Commit terminal status and both events under the same lock.
-                        result_events = [{'type': 'result', 'text': a['text'], 'step': state['steps']}] if status == 'completed' else []
+                        # Commit terminal status and evidence under the same lock.
+                        # Do not publish model self-certification as verified proof.
+                        result_events = [{'type': 'result', 'text': text, 'step': state['steps']}] if status == 'completed' else []
                         self.save(tid, status, state, {'type': 'verification', 'text': text, 'step': state['steps']}, result_events)
                         return
                     state['messages'].append({'role': 'user', 'content': text})
@@ -471,7 +479,7 @@ class TaskManager:
                 state['checked'] = sorted(workspace.checked)
                 state['messages'].append({'role': 'user', 'content': 'UNTRUSTED TOOL RESULT: ' + output})
                 extra = []
-                if kind == 'write_docx' and not failed:
+                if kind in ('write_docx', 'write_file', 'copy_file') and not failed:
                     extra = [{'type': 'file', 'text': workspace.path(a['path']).relative_to(workspace.root).as_posix()}]
                 self.save(tid, 'running', state, {'type': 'tool', 'text': output[:4000], 'step': state['steps']}, extra)
             finish('budget_exhausted', 'Step budget exhausted; not complete.')
@@ -480,14 +488,20 @@ class TaskManager:
         except Exception:
             finish('blocked', 'Task/provider failed; not complete. Check configuration and quota.')
 
-    def _context(self, tid, state, goal):
+    def _context(self, tid, state, goal, checks=None):
         """Deterministic view compaction; immutable full evidence remains in SQLite."""
-        messages = state['messages']
+        contract = {'role': 'user', 'content': 'Original user instruction: ' + goal
+                    + '\nGeneration requirements/preferences (not deterministic proof): '
+                    + state.get('requirements', '')
+                    + '\nUser clarifications: ' + state.get('clarification', '')
+                    + '\nHard acceptance checks (enforced by harness): '
+                    + json.dumps(checks or [], ensure_ascii=False)}
+        messages = [state['messages'][0], contract, *state['messages'][1:]]
         limit = state['budgets']['context']
         size = lambda rows: len(json.dumps(rows, ensure_ascii=False))
         if size(messages) <= limit:
             return messages
-        head = [messages[0], {'role': 'user', 'content': goal}]
+        head = [messages[0], contract]
         summary = {'role': 'user', 'content': 'Trajectory compacted, full original evidence retained in durable log. '
                    + json.dumps({'steps': state['steps'], 'written': state['written'], 'checked': state['checked']})
                    + '\nOlder content omitted, not proof of semantic completion. Use tools to recheck artifacts.'}

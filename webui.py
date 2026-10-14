@@ -145,7 +145,8 @@ PAGE = r"""<!doctype html>
   #checks { flex: 1; min-width: 120px; display: none; background: #10151b;
             border: 1px solid #242c35; color: #9aa4ae; border-radius: 6px;
             padding: 5px 7px; font-size: 10.5px; }
-  #composer.taskmode #checks { display: block; }
+  #requirements { display: none; min-width: 160px; flex: 1; background: #10151b; color: #9aa4ae; border: 1px solid #242c35; border-radius: 6px; padding: 5px 7px; }
+  #composer.taskmode #checks, #composer.taskmode #requirements { display: block; }
   #stop:disabled { opacity: .35; cursor: default; }
   #send { margin-left: auto; width: 30px; height: 30px; flex: none; border-radius: 50%; border: 0;
           cursor: pointer; background: #4cc38a; color: #052e1e; font-size: 14px; font-weight: 700; }
@@ -220,6 +221,7 @@ PAGE = r"""<!doctype html>
         <label class="tool" title="Upload file">+ <input id="upload" type="file" style="display:none" aria-label="Upload document" accept=".txt,.md,.csv,.json,.py,.js,.html,.css,.pdf,.docx" onchange="uploadFile(this)"></label>
         <select id="mode" title="Mode"><option value="chat">Chat</option><option value="task">Task loop</option></select>
         <input id="checks" aria-label="Artifact checks JSON" placeholder='Checks JSON: [{"type":"file_text","path":"out.txt","text":"hello"}]'>
+        <input id="requirements" aria-label="Generation requirements" placeholder="Generation requirements: language, format, content, tone (optional)">
         <button id="stop" class="tool" onclick="stopTask()" disabled>■ Stop</button>
         <button id="send" onclick="send()" title="Send" aria-label="Send">↑</button>
       </div>
@@ -325,7 +327,7 @@ async function send() {
   try {
     const res = await fetch(isTask ? '/task' : '/chat', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text, ...(isTask && document.getElementById('checks').value.trim() ? {checks: JSON.parse(document.getElementById('checks').value)} : {})})
+      body: JSON.stringify({message: text, ...(isTask ? {requirements: document.getElementById('requirements').value.trim()} : {}), ...(isTask && document.getElementById('checks').value.trim() ? {checks: JSON.parse(document.getElementById('checks').value)} : {})})
     });
     if (!res.ok) throw new Error(await res.text());
     if (isTask) {
@@ -439,7 +441,7 @@ async function watchTask(id, bubble) {
       for (const e of events) { if (e.seq <= after) continue; after = view.after = e.seq; noteFile(view, e); if (e.type === 'retry') retryText = e.text; else if (e.type !== 'progress') retryText = ''; if (e.type !== 'progress') bubble.textContent += '[' + e.type + '] ' + e.text + '\n'; }
       const sr = await fetch('/tasks/' + id); if (!sr.ok) throw new Error('Could not load task status');
       const row = await sr.json();
-      document.getElementById('status').textContent = (row.status === 'running' && retryText) ? retryText : row.status + ' · step ' + row.steps;
+      document.getElementById('status').textContent = (row.status === 'running' && retryText) ? retryText : row.status + ' · step ' + row.steps + (row.attempts === undefined ? '' : ' · provider attempts ' + row.attempts + '/' + row.budgets.steps);
       taskStatuses.set(id, row.status); updateStopButton();
       if (!['queued','running'].includes(row.status)) {
         // Status may have committed after the preceding events request.
@@ -942,7 +944,7 @@ def task():
         if app.config['MOCK'] and not config_snapshot()[0]:
             return {'type': 'blocked', 'text': 'Task mode needs a real API key. Mock mode cannot perform tasks.', 'step': 0}, 400
         tid = manager.submit(sid, goal, [*c['history'], *upload_context(c)], task_provider(),
-                             checks=data.get('checks'), budgets=data.get('budgets'))
+                             checks=data.get('checks'), budgets=data.get('budgets'), requirements=data.get('requirements', ''))
         return {'id': tid, 'status': 'queued', 'status_url': '/tasks/' + tid}, 202
     except (ValueError, OSError) as exc:
         return {'error': str(exc)}, 400
@@ -1002,7 +1004,9 @@ def task_status(tid):
     row = task_manager().get(tid, session['sid'])
     if not row: return {'error': 'Not found'}, 404
     return {'id': tid, 'status': row['status'], 'goal': row['goal'],
-            'steps': row['state']['steps'], 'budgets': row['state']['budgets'],
+            'steps': row['state']['steps'], 'attempts': row['state'].get('attempts', row['state']['steps']), 'budgets': row['state']['budgets'],
+            'requirements': row['state'].get('requirements', ''), 'checks': row['checks'],
+            'verification_scope': 'Only explicit checks are verified; content quality is not independently verified.',
             'elapsed': row['state']['elapsed'], 'output': row['state']['output']}
 
 

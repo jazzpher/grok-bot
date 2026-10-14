@@ -9,6 +9,23 @@ class ResumeHTTPTests(__import__('unittest').TestCase):
     wait = test_harness_http.HTTPHarnessTests.wait
     wait_worker_gone = test_harness_http.HTTPHarnessTests.wait_worker_gone
     owner = test_harness_http.HTTPHarnessTests.owner
+    def test_requirements_http_validation_prompt_and_owner_isolation(self):
+        seen = []
+        def provider():
+            return lambda msgs: (seen.append(json.dumps(msgs)), json.dumps({'action':'need_input','text':'Which venue?'}))[1]
+        with patch.object(webui, 'task_provider', provider):
+            for invalid in (None, {}, '漢'*3000):
+                self.assertEqual(self.a.post(self.url+'/task', json={'message':'invitation','requirements':invalid}).status_code, 400)
+            r = self.a.post(self.url+'/task', json={'message':'invitation','requirements':'Tagalog; numbered list; warm'})
+            self.assertEqual(r.status_code, 202)
+            tid = r.json()['id']
+            self.assertEqual(self.wait(tid)['status'], 'needs_input')
+            row = self.a.get(self.url+'/tasks/'+tid).json()
+            self.assertEqual(row['requirements'], 'Tagalog; numbered list; warm')
+            self.assertEqual(row['attempts'], 1)
+            self.assertIn('Tagalog; numbered list; warm', seen[0])
+            self.assertEqual(self.b.get(self.url+'/tasks/'+tid).status_code, 404)
+
     def test_checks_on_resume_route_validates_owner_and_publishes_verified_result(self):
         def provider(): return lambda _:json.dumps({'action':'done','text':'HTTP_FINAL_SENTINEL'})
         with patch.object(webui,'task_provider',provider):
@@ -24,5 +41,8 @@ class ResumeHTTPTests(__import__('unittest').TestCase):
             self.assertEqual(r.status_code,202)
             self.assertEqual(self.wait(tid)['status'],'completed')
             events=self.a.get(self.url+'/tasks/'+tid+'/events').json()
-            self.assertEqual([e['text'] for e in events if e['type']=='result'],['HTTP_FINAL_SENTINEL'])
+            results = [e['text'] for e in events if e['type']=='result']
+            self.assertEqual(len(results), 1)
+            self.assertIn('Explicit artifact checks passed', results[0])
+            self.assertNotIn('HTTP_FINAL_SENTINEL', results[0])
             self.assertEqual(self.manager.get(tid,self.owner())['state']['steps'],2)
