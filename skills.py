@@ -8,6 +8,9 @@ import threading
 import time
 
 _LOCK = threading.RLock()
+_SECRET_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])AIza[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])|(?<![A-Za-z0-9_])sk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,}(?![A-Za-z0-9_-])|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+)
 MAX_SKILLS = 30
 MAX_BYTES = 12000
 DAY = 86400
@@ -48,12 +51,18 @@ class SkillStore:
             raise ValueError('Skill symlinks are not allowed.')
         if not path.exists():
             created = self.path(name).stat().st_mtime
-            return {'created': created, 'last_used': created, 'uses': 0, 'archived': False}
+            return {'created': created, 'last_used': created, 'uses': 0, 'archived': False,
+                    'created_by': 'legacy', 'pinned': False}
         if path.stat().st_size > 2000:
             raise ValueError('Invalid skill metadata.')
         data = json.loads(path.read_text(encoding='utf-8'))
         if (not isinstance(data, dict) or not all(type(data.get(k)) in (int, float) for k in ('created', 'last_used', 'uses'))
                 or type(data.get('archived')) is not bool):
+            raise ValueError('Invalid skill metadata.')
+        # Older skills remain user-owned until they have explicit agent provenance.
+        data.setdefault('created_by', 'legacy')
+        data.setdefault('pinned', False)
+        if data['created_by'] not in ('agent', 'user', 'legacy') or type(data['pinned']) is not bool:
             raise ValueError('Invalid skill metadata.')
         return data
 
@@ -62,18 +71,28 @@ class SkillStore:
         temp = path.with_name('metadata.tmp')
         if path.is_symlink() or temp.is_symlink():
             raise ValueError('Skill symlinks are not allowed.')
-        with open(temp, 'w', encoding='utf-8') as f:
-            os.chmod(temp, 0o600)
-            f.write(json.dumps(data)); f.flush(); os.fsync(f.fileno())
-        os.replace(temp, path)
+        try:
+            with open(temp, 'w', encoding='utf-8') as f:
+                os.chmod(temp, 0o600)
+                f.write(json.dumps(data)); f.flush(); os.fsync(f.fileno())
+            os.replace(temp, path)
+        except Exception:
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     def curate(self, name):
         meta = self.metadata(name)
         age = max(0, time.time() - meta['last_used'])
-        if age >= 30 * DAY and not meta['archived']:
+        managed = meta['created_by'] == 'agent'
+        if managed and not meta['pinned'] and age >= 30 * DAY and not meta['archived']:
             meta['archived'] = True
             self.write_metadata(name, meta)
-        status = 'archived' if meta['archived'] else 'stale' if age >= 14 * DAY else 'active'
+        status = ('archived' if meta['archived'] else
+                  'pinned' if meta['pinned'] else
+                  'stale' if managed and age >= 14 * DAY else 'active')
         return {**meta, 'status': status}
 
     def use(self, name):
@@ -97,11 +116,23 @@ class SkillStore:
             self.write_metadata(name, meta)
             return row
 
+    def set_pinned(self, name, revision, pinned):
+        if type(pinned) is not bool:
+            raise ValueError('Pinned must be true or false.')
+        with _LOCK:
+            row = self.read(name)
+            if row['revision'] != revision:
+                raise ValueError('Skill changed. Refresh before changing its pin.')
+            meta = self.metadata(name)
+            meta['pinned'] = pinned
+            self.write_metadata(name, meta)
+            return {**row, **self.curate(name)}
+
     def list(self, include_archived=False):
         with _LOCK:
             if self.root.is_symlink() or self.root.parent.is_symlink():
                 raise ValueError('Skill symlinks are not allowed.')
-            names = sorted(p.name for p in self.root.glob('*') if p.is_dir() and (p / 'SKILL.md').exists())[:MAX_SKILLS]
+            names = sorted(p.name for p in self.root.glob('*') if p.is_dir() and (p / 'SKILL.md').exists())
             rows = []
             for name in names:
                 try:
@@ -109,41 +140,80 @@ class SkillStore:
                     meta = self.curate(name)
                     if include_archived or meta['status'] != 'archived':
                         rows.append({**{k: row[k] for k in ('name', 'description', 'revision')}, **meta})
+                        if len(rows) >= MAX_SKILLS:
+                            break
                 except (ValueError, OSError, UnicodeError):
                     continue
             return rows
 
-    def save(self, name, description, content, revision=''):
+    def save(self, name, description, content, revision='', created_by='agent'):
         with _LOCK:
             path = self.path(name)
             if not isinstance(description, str) or not 1 <= len(description.strip()) <= 160:
                 raise ValueError('Description must be 1-160 characters.')
             if not isinstance(content, str) or not content.strip():
                 raise ValueError('Write the workflow as Markdown text.')
+            if created_by not in ('agent', 'user'):
+                raise ValueError('Unknown skill provenance.')
             raw = '---\nname: ' + name + '\ndescription: ' + json.dumps(description.strip(), ensure_ascii=False) + '\n---\n' + content.strip() + '\n'
             if len(raw.encode('utf-8')) > MAX_BYTES:
                 raise ValueError('Skill exceeds 12 KB.')
-            if re.search(r'AIza[\w-]{20,}|sk-[\w-]{16,}|-----BEGIN .*PRIVATE KEY-----', raw):
+            if _SECRET_PATTERN.search(raw):
                 raise ValueError('Do not save credentials in skills.')
             if path.exists():
-                self.metadata(name)
+                existing_meta = self.metadata(name)
                 if self.read(name)['revision'] != revision:
                     raise ValueError('Skill changed. Read it first and provide its revision before editing.')
-            elif revision:
-                raise ValueError('Skill no longer exists; refresh before editing.')
-            elif len(list(self.root.glob('*/SKILL.md'))) >= MAX_SKILLS:
-                raise ValueError('Skill limit reached (30).')
+            else:
+                existing_meta = None
+                if revision:
+                    raise ValueError('Skill no longer exists; refresh before editing.')
+                if len(self.list(include_archived=True)) >= MAX_SKILLS:
+                    raise ValueError('Skill limit reached (30).')
+            metadata_path = path.with_name('metadata.json')
+            if metadata_path.is_symlink():
+                raise ValueError('Skill symlinks are not allowed.')
+            previous_payload = path.read_bytes() if path.exists() else None
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             temp = path.with_suffix('.tmp')
             if temp.is_symlink():
                 raise ValueError('Skill symlinks are not allowed.')
-            with open(temp, 'w', encoding='utf-8') as f:
-                os.chmod(temp, 0o600)
-                f.write(raw); f.flush(); os.fsync(f.fileno())
-            os.replace(temp, path)
-            if not path.with_name('metadata.json').exists():
-                now = time.time()
-                self.write_metadata(name, {'created': now, 'last_used': now, 'uses': 0, 'archived': False})
+            payload = raw.encode('utf-8')
+            try:
+                with open(temp, 'wb') as f:
+                    os.chmod(temp, 0o600)
+                    f.write(payload); f.flush(); os.fsync(f.fileno())
+                os.replace(temp, path)
+                if path.stat().st_size != len(payload) or path.stat().st_size > MAX_BYTES:
+                    raise ValueError('Saved skill does not match the size limit.')
+            except Exception:
+                try:
+                    temp.unlink(missing_ok=True)
+                    if not path.exists() and path.parent.exists():
+                        path.parent.rmdir()
+                except OSError:
+                    pass
+                raise
+            if not metadata_path.exists():
+                if existing_meta is None:
+                    now = time.time()
+                    existing_meta = {'created': now, 'last_used': now, 'uses': 0, 'archived': False,
+                                     'created_by': created_by, 'pinned': False}
+                try:
+                    self.write_metadata(name, existing_meta)
+                except Exception:
+                    try:
+                        if previous_payload is None:
+                            path.unlink(missing_ok=True)
+                            path.parent.rmdir()
+                        else:
+                            with open(temp, 'wb') as f:
+                                os.chmod(temp, 0o600)
+                                f.write(previous_payload); f.flush(); os.fsync(f.fileno())
+                            os.replace(temp, path)
+                    except Exception as rollback_error:
+                        raise OSError('Skill metadata save failed and content rollback also failed.') from rollback_error
+                    raise
             return self.read(name)
 
     def delete(self, name, revision):

@@ -103,7 +103,7 @@ PAGE = r"""<!doctype html>
 </div>
 <section id="skillsPanel" hidden style="padding:12px 16px;border-block:1px solid #333;max-height:55vh;overflow:auto">
 <strong>Saved skills</strong>
-<p>Reusable workflows, private to this browser session. Task loop can save and load them. No background model calls; skill actions use normal task steps. New chat keeps skills. Curator: stale after 14 unused days, archived after 30. Archive keeps the file; restore to use it again.</p>
+<p>Reusable workflows, private to this browser session. Task loop can save and load them. No background model calls; skill actions use normal task steps. New chat keeps skills. Agent-created skills become stale after 14 unused days and archive after 30; pinned, manually created and legacy skills are never auto-archived. Archived files remain on disk and can be restored.</p>
 <select id="skillselect" aria-label="Saved skill" onchange="loadSkill()"><option value="">New skill</option></select>
 <button onclick="refreshSkills()">Refresh</button>
 <button onclick="newSkill()">New skill</button>
@@ -117,6 +117,7 @@ PAGE = r"""<!doctype html>
 ## Verification"></textarea>
 <button onclick="saveSkill()">Save skill</button>
 <button onclick="restoreSkill()">Restore selected skill</button>
+<button onclick="togglePinSkill()">Pin / unpin selected skill</button>
 <button onclick="deleteSkill()">Delete selected skill</button>
 <span id="skillstatus" role="status" aria-live="polite"></span>
 </section>
@@ -130,10 +131,11 @@ const chat = document.getElementById('chat');
 const inp = document.getElementById('in');
 const sendBtn = document.getElementById('send');
 let skillRevision = '';
+let skillPinned = false;
 function newSkill() {
   for (const id of ['skillname','skilldescription','skillcontent','skillselect']) document.getElementById(id).value = '';
   document.getElementById('skillname').disabled = false;
-  skillRevision = ''; document.getElementById('skillstatus').textContent = 'New workflow';
+  skillRevision = ''; skillPinned = false; document.getElementById('skillstatus').textContent = 'New workflow';
 }
 async function refreshSkills() {
   try {
@@ -157,7 +159,7 @@ async function loadSkill() {
     const row = await res.json();
     document.getElementById('skillname').value = row.name; document.getElementById('skillname').disabled = true;
     document.getElementById('skilldescription').value = row.description; document.getElementById('skillcontent').value = row.content;
-    skillRevision = row.revision; document.getElementById('skillstatus').textContent = 'Loaded full Markdown workflow';
+    skillRevision = row.revision; skillPinned = !!row.pinned; document.getElementById('skillstatus').textContent = 'Loaded workflow (' + row.status + ', ' + (row.created_by || 'legacy') + ')';
   } catch(e) {document.getElementById('skillstatus').textContent = e.message;}
 }
 async function saveSkill() {
@@ -177,6 +179,16 @@ async function restoreSkill() {
     const res = await fetch('/skills/' + encodeURIComponent(name) + '/restore', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision:skillRevision})});
     if (!res.ok) throw new Error(await res.text()); await refreshSkills();
     document.getElementById('skillstatus').textContent = 'Restored: ' + name;
+  } catch(e) {document.getElementById('skillstatus').textContent = e.message;}
+}
+async function togglePinSkill() {
+  const name = document.getElementById('skillselect').value; if (!name || !skillRevision) return;
+  try {
+    const res = await fetch('/skills/' + encodeURIComponent(name) + '/pin', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision:skillRevision,pinned:!skillPinned})});
+    if (!res.ok) throw new Error(await res.text());
+    const row = await res.json(); skillRevision = row.revision; skillPinned = !!row.pinned;
+    await refreshSkills(); document.getElementById('skillselect').value = name;
+    document.getElementById('skillstatus').textContent = (skillPinned ? 'Pinned: ' : 'Unpinned: ') + name;
   } catch(e) {document.getElementById('skillstatus').textContent = e.message;}
 }
 async function deleteSkill() {
@@ -840,7 +852,7 @@ def skill_list_save():
         data = request.get_json(silent=True)
         if not isinstance(data, dict):
             return {'error': 'Send a JSON object'}, 400
-        return store.save(data.get('name'), data.get('description'), data.get('content'), data.get('revision', ''))
+        return store.save(data.get('name'), data.get('description'), data.get('content'), data.get('revision', ''), created_by='user')
     except (ValueError, OSError, UnicodeError) as exc:
         return {'error': str(exc)}, 400
 
@@ -848,7 +860,8 @@ def skill_list_save():
 @app.route('/skills/<name>')
 def skill_read(name):
     try:
-        return client()['workspace'].skills.read(name)
+        store = client()['workspace'].skills
+        return {**store.read(name), **store.curate(name)}
     except (ValueError, OSError, UnicodeError):
         return {'error': 'Skill not found or invalid'}, 404
 
@@ -860,6 +873,17 @@ def skill_restore(name):
         return {'error': 'Send a JSON object'}, 400
     try:
         return client()['workspace'].skills.restore(name, data.get('revision'))
+    except (ValueError, OSError, UnicodeError) as exc:
+        return {'error': str(exc)}, 400
+
+
+@app.route('/skills/<name>/pin', methods=['POST'])
+def skill_pin(name):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or type(data.get('pinned')) is not bool:
+        return {'error': 'Send JSON with a boolean pinned field'}, 400
+    try:
+        return client()['workspace'].skills.set_pinned(name, data.get('revision'), data['pinned'])
     except (ValueError, OSError, UnicodeError) as exc:
         return {'error': str(exc)}, 400
 
