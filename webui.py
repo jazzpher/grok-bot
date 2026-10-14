@@ -31,13 +31,13 @@ SYSTEM_PROMPT = 'You are a helpful assistant. Do not claim to be a particular pr
 # receive the user's key. model_hint is the model used when the user leaves Model blank.
 PROVIDER_ROWS = [
     ('gemini', 'Google Gemini', 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', 'gemini-flash-latest'),
-    ('nvidia', 'NVIDIA NIM', 'https://integrate.api.nvidia.com/v1/chat/completions', ''),
-    ('openrouter', 'OpenRouter', 'https://openrouter.ai/api/v1/chat/completions', ''),
-    ('groq', 'Groq', 'https://api.groq.com/openai/v1/chat/completions', ''),
-    ('cerebras', 'Cerebras', 'https://api.cerebras.ai/v1/chat/completions', ''),
-    ('mistral', 'Mistral', 'https://api.mistral.ai/v1/chat/completions', ''),
-    ('deepseek', 'DeepSeek', 'https://api.deepseek.com/chat/completions', ''),
-    ('xai', 'xAI Grok', 'https://api.x.ai/v1/chat/completions', ''),
+    ('nvidia', 'NVIDIA NIM', 'https://integrate.api.nvidia.com/v1/chat/completions', 'nvidia/nemotron-3-ultra-550b-a55b'),
+    ('openrouter', 'OpenRouter', 'https://openrouter.ai/api/v1/chat/completions', 'openrouter/free'),
+    ('groq', 'Groq', 'https://api.groq.com/openai/v1/chat/completions', 'llama-3.1-8b-instant'),
+    ('cerebras', 'Cerebras', 'https://api.cerebras.ai/v1/chat/completions', 'llama3.1-8b'),
+    ('mistral', 'Mistral', 'https://api.mistral.ai/v1/chat/completions', 'mistral-small-latest'),
+    ('deepseek', 'DeepSeek', 'https://api.deepseek.com/chat/completions', 'deepseek-chat'),
+    ('xai', 'xAI Grok', 'https://api.x.ai/v1/chat/completions', 'grok-4-fast'),
 ]
 PROVIDERS = {pid: {'label': label, 'url': url, 'model_hint': hint}
              for pid, label, url, hint in PROVIDER_ROWS}
@@ -550,7 +550,11 @@ function providerChanged() {
   const custom = sel.value === 'custom';
   document.getElementById('urlin').style.display = custom ? '' : 'none';
   const p = providerList.find(x => x.id === sel.value);
-  document.getElementById('modelin').placeholder = p && p.model_hint ? 'Model (blank = ' + p.model_hint + ')' : 'Model (optional, blank = auto)';
+  const mi = document.getElementById('modelin');
+  mi.placeholder = p && p.model_hint ? 'Model (blank = ' + p.model_hint + ')' : 'Model (optional, blank = auto)';
+  // Prefill so the request never falls back to a model the provider does not have.
+  if (p && p.model_hint && (!mi.value || providerList.some(x => x.model_hint === mi.value))) mi.value = p.model_hint;
+  else if (custom && providerList.some(x => x.model_hint === mi.value)) mi.value = '';
 }
 async function toggleSettings() {
   const open = document.getElementById('settings').classList.toggle('open');
