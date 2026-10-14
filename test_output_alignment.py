@@ -37,38 +37,33 @@ class AlignmentTests(unittest.TestCase):
         status, _ = self.m._verify({'checks':[{'type':'file_text','path':'out.docx','text':'hello'}]}, {}, ws)
         self.assertEqual(status, 'check')
 
-    def test_irrelevant_docx_is_content_unverified_not_completed(self):
+    def test_irrelevant_docx_completes_with_honest_review_caveat(self):
         replies = iter([act('write_docx', path='out.docx', content='unrelated'),
                         act('done', text='All requirements satisfied!')])
         tid = self.m.submit('alice', 'Write a Tagalog invitation', [], lambda _: next(replies))
         row = self.wait(tid)
-        self.assertEqual(row['status'], 'needs_input')
+        self.assertEqual(row['status'], 'completed')
         events = self.m.events(tid, 'alice')
-        self.assertFalse(any(e['type']=='result' for e in events))
-        self.assertIn('content-unverified', events[-1]['text'])
-        self.assertIn('review', events[-1]['text'].lower())
+        result = [e['text'] for e in events if e['type'] == 'result']
+        self.assertEqual(len(result), 1)
+        self.assertNotIn('All requirements satisfied', result[0])
+        self.assertIn('not independently checked', result[0])
 
-    def test_attempt_limit_includes_invalid_replies(self):
+    def test_invalid_replies_do_not_use_steps_but_are_capped(self):
         calls = []
-        tid = self.m.submit('alice', 'Write hello', [], lambda _: (calls.append(1), 'bad')[1], budgets={'steps':1})
+        tid = self.m.submit('alice', 'Write hello', [], lambda _: (calls.append(1), 'bad')[1], budgets={'steps': 1})
         row = self.wait(tid)
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(row['state']['attempts'], 1)
-        self.assertEqual(row['status'], 'budget_exhausted')
+        self.assertEqual(len(calls), 6)
+        self.assertEqual(row['status'], 'blocked')
+        self.assertEqual(row['state']['steps'], 0)
+        self.assertEqual(row['state']['invalid'], 6)
 
-    def test_legacy_attempt_count_prevents_resume_reset(self):
-        tid = self.m.submit('alice', 'goal', [], lambda _: act('need_input', text='date?'), budgets={'steps':2})
+    def test_invalid_then_valid_within_two_step_budget(self):
+        replies = iter(['bad', 'worse', act('write_docx', path='a.docx', content='Hello'), act('done', text='ok')])
+        tid = self.m.submit('alice', 'Write hello', [], lambda _: next(replies), budgets={'steps': 2})
         row = self.wait(tid)
-        state = row['state']
-        state.pop('attempts')
-        state['invalid'] = 1
-        self.m.save(tid, 'blocked', state, {'type':'test','text':'legacy refunded attempt'})
-        calls = []
-        self.assertTrue(self.m.resume(tid, 'alice', lambda _: calls.append(1)))
-        row = self.wait(tid)
-        self.assertEqual(row['status'], 'budget_exhausted')
-        self.assertEqual(calls, [])
-        self.assertEqual(row['state']['attempts'], 2)
+        self.assertEqual(row['status'], 'completed')
+        self.assertEqual(row['state']['steps'], 2)
 
     def test_requirements_validation_and_owner_isolation(self):
         for requirements in (None, {}, '漢'*3000):
