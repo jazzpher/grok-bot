@@ -93,6 +93,13 @@ unlimited archival guarantee. The direct manager API exposes explicit `prune()`.
 Defaults/hard upper bounds: 12 provider attempts, 300 seconds cumulative active
 elapsed time, 128000 cumulative UTF-8 bytes of model/tool output, 24000 serialized
 context characters. Client budgets may only lower these. Minimum context is 4000.
+Provider responses are streamed with a body cap of six times the remaining output
+budget plus 64 KiB for the JSON envelope; parsed model content must fit the
+remaining byte budget. Oversized file reads are skipped, and tool output is
+discarded rather than allowed to push the cumulative counter over its limit.
+Chat replies are capped at 128000 UTF-8 bytes, with the provider stream body
+capped at six times that limit plus 64 KiB; malformed SSE events are ignored, and
+incomplete or oversized replies are not saved to history.
 Transient connection/timeouts and HTTP 500/502/503/504 retry at most three
 consecutive attempts with cancellable bounded backoff; each costs a step.
 400/401/403/429 never retry. No fallback model, billing changes or quota bypass.
@@ -107,6 +114,8 @@ rules/goal cannot fit, task is budget_exhausted. Budgets are checked before call
 and before actions. Cooperative cancellation/deadlines do not kill an in-flight
 request: the configured connect/read timeout bounds ordinary waits, but Python
 threads and an adversarial slow-drip provider are not hard wall-clock sandboxes.
+Chat-stream Stop is checked between parsed SSE lines, so a stalled or unterminated
+line can also delay cancellation.
 No token-price/currency billing estimator is claimed.
 
 Run **one server process**. Unix uses stdlib `fcntl.flock`; Windows uses
@@ -114,8 +123,8 @@ Run **one server process**. Unix uses stdlib `fcntl.flock`; Windows uses
 the handle releases ownership. No Gunicorn multiworker, Flask reloader or
 network-filesystem database. Use local disk and threaded serving. Unix database
 and lock mode is 0600; on Windows restrict the data directory with Windows ACLs.
-Linux execution and simulated Windows lock/import behavior are tested; native
-Windows execution has not been verified. Migration from future incompatible
+Linux and native Windows execution are tested; symlink and POSIX mode assertions
+are conditional on platform support. Migration from future incompatible
 schemas, distributed queues, hard sandboxing and automatic workspace GC are absent.
 
 For any tunnel/proxy use exposed mode, strong `GROK_APP_PASSWORD`, stable secret,
