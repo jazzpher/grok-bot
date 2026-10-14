@@ -57,10 +57,10 @@ style preferences should not require a generic verification dead end.
 DOCX creation checks that a candidate reopens and its extracted text equals the
 tool input before atomic replacement. A failed build/check/replace preserves the
 existing file. This checks file integrity, not whether the model wrote the right
-invitation. With no explicit checks the download remains available, labeled
-**artifact-created/content-unverified**, and the task pauses for review or revision.
-Use the message box and **Resume selected task** for clarification/revision, or
-start a new task if its cumulative provider budget has run out.
+invitation. With no explicit checks, a task that wrote only .docx files completes
+once the harness reopens each file and finds text. The result says only that was
+verified (language, content and style were not independently checked), and the
+download stays available. Add a file_text check for exact-text verification.
 
 `file_text` for DOCX now means the **entire extracted body text equals expected
 text**, not substring matching (compatibility change). Paragraphs, including blank
@@ -71,10 +71,9 @@ use exact UTF-8 bytes; `exact_copy` still uses byte equality. No `contains` chec
 or semantic model verdict is introduced. Example:
 `[{"type":"file_text","path":"invite.docx","text":"Paanyaya\nKumusta!"}]`.
 
-`budgets.steps` caps actual provider attempts, including invalid JSON and transient
-retries. Separate persisted `attempts` and `steps` are visible; invalid responses
-refund only the action-step counter, never actual attempts. Legacy tasks recover
-attempts from checkpoints; resume cannot reset them. Self-review is advisory within
+`budgets.steps` caps valid action steps. Invalid replies do not use a step; they
+have a separate cap of 5 per task, then the task is `blocked` (Resume works). The
+persisted `attempts` counter is informational (provider calls made). Self-review is advisory within
 this same budget, with no hidden extra requests. Live generated-answer quality,
 native Windows and physical mobile/browser rendering were not tested in this upgrade.
 
