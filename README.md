@@ -55,7 +55,7 @@ Example `mcp.json` (copy `mcp.example.json`):
 
 Docker is **optional**. Sandbox backends (`GROK_SANDBOX_BACKEND`, default `auto` = `docker` when the
 docker CLI is installed, otherwise `subprocess`): `subprocess` — commands run as your user inside the
-workspace with keys scrubbed from the environment; **not** an isolation boundary — or `docker` — one
+workspace with keys scrubbed from the environment; **not** an isolation boundary, so every command asks for approval — or `docker` — one
 throwaway container per command, no network unless the policy allows it, workspace bind-mounted,
 read-only root, command timeout enforced inside the container. `off` disables `run_command` entirely. `docker compose up` runs the whole app in a
 container, which is the recommended way to let it work on untrusted code.
