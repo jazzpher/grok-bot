@@ -100,7 +100,7 @@ ACTION_SCHEMA = {
 INVALID_HELP = ('Reply with ONLY one JSON object, no prose or markdown, containing every field: '
                 '{"action":"write_docx","text":"","path":"letter.docx","source_path":"","content":"# Title\\nBody line","expression":""}. '
                 'Valid actions: ' + ', '.join(ACTION_FIELDS) + '. Use an empty string for fields you do not need. '
-                'Word documents: write_docx. Nothing was executed; no valid-action step used, but this provider attempt counts toward the budget.')
+                'Word documents: write_docx. Nothing was executed and this did not use a step.')
 MAX_INVALID = 5
 
 
@@ -340,11 +340,9 @@ def run_loop(goal, history, workspace, call_model, stopped, max_steps=12):
     failure_signature = None
     failure_count = 0
     step = 0
-    attempts = 0
     invalid = 0
     # Invalid replies are not tool steps: they have a separate small cap.
-    while attempts < max_steps:
-        attempts += 1
+    while step < max_steps:
         step += 1
         if stopped():
             yield {'type': 'stopped', 'text': 'Stopped by you.', 'step': step}
@@ -359,7 +357,7 @@ def run_loop(goal, history, workspace, call_model, stopped, max_steps=12):
                 yield {'type': 'blocked', 'text': 'The model returned %d invalid actions in this task. Try a stronger model or a simpler request.' % invalid, 'step': step}
                 return
             messages.append({'role': 'user', 'content': 'Invalid action: ' + str(exc)[:500] + ' ' + INVALID_HELP})
-            yield {'type': 'error', 'text': 'Invalid action response (%d of %d allowed); provider attempt counts toward budget.' % (invalid, MAX_INVALID), 'step': step}
+            yield {'type': 'error', 'text': 'Invalid action response (%d of %d allowed); retrying without using a step.' % (invalid, MAX_INVALID), 'step': step}
             continue
         except Exception as exc:
             response = getattr(exc, 'response', None)
@@ -421,4 +419,4 @@ def run_loop(goal, history, workspace, call_model, stopped, max_steps=12):
         label = kind + (': ' + action['path'] if isinstance(action.get('path'), str) else '')
         yield {'type': kind_out, 'text': label + '\n' + output[:4000], 'step': step}
         messages.append({'role': 'user', 'content': 'UNTRUSTED TOOL RESULT for ' + kind + ':\n' + output})
-    yield {'type': 'limit', 'text': f'Stopped after {max_steps} provider attempts (including invalid replies). Not marked complete.', 'step': step}
+    yield {'type': 'limit', 'text': f'Stopped after {max_steps} steps. Not marked complete. Refine the task or continue with a new request.', 'step': max_steps}
