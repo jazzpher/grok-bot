@@ -177,12 +177,15 @@ https://hermes-agent.nousresearch.com/docs/user-guide/features/skills
   learn and reuse automatically, or the Skills panel to create/edit directly.
 
 Storage: `workspaces/.skills/<browser-session-id>/<skill-name>/SKILL.md` (under
-`GROK_WORKSPACE_DIR` when configured). New chat and server restarts preserve
-skills for the same browser session. A different browser or cleared cookies
-has a separate library. Existing server session-cookie lifetime still applies.
-Skills are outside the task workspace, so ordinary file tools cannot overwrite
-or download them. They are never committed to the public repository. Back up
-this folder together with server data if you need durable storage elsewhere.
+`GROK_WORKSPACE_DIR` when configured). Agent-created skills carry explicit
+provenance and are eligible for the zero-cost stale/archive lifecycle; manually
+created and legacy skills are protected from automatic archival. Pin an agent
+skill to exempt it from automatic status changes. New chat and server restarts
+preserve skills for the same browser session. A different browser or cleared
+cookies has a separate library. Existing server session-cookie lifetime still
+applies. Skills are outside the task workspace, so ordinary file tools cannot
+overwrite or download them. They are never committed to the public repository.
+Back up this folder together with server data if you need durable storage elsewhere.
 
 Example of the actual saved format (not seeded into your library):
 

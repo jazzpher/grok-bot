@@ -22,6 +22,7 @@ class Skills(unittest.TestCase):
         self.assertIn('SKILL.md', str(self.store.path('exact-copy')))
         self.assertEqual(SkillStore(self.root/'workspaces'/'alice').read('exact-copy'), row)
         self.assertEqual(row['content'].strip(), BODY)
+        self.assertEqual(self.store.path('exact-copy').stat().st_size, len(row['markdown'].encode('utf-8')))
         self.assertNotIn(BODY, self.store.index_context())
     def test_edit_conflict_and_delete(self):
         row = self.store.save('copy', 'Copies', BODY)
@@ -56,6 +57,24 @@ class Skills(unittest.TestCase):
         with patch('skills.os.replace', side_effect=OSError('disk error')):
             with self.assertRaises(OSError): self.store.save('copy','Copies','changed',row['revision'])
         self.assertEqual(self.store.read('copy'),row)
+    def test_failed_new_write_leaves_no_orphan(self):
+        with patch('skills.os.replace', side_effect=OSError('disk error')):
+            with self.assertRaises(OSError): self.store.save('orphan', 'Orphan', BODY)
+        self.assertFalse((self.store.root / 'orphan').exists())
+        self.assertEqual(self.store.list(), [])
+
+    def test_failed_metadata_write_rolls_back_skill_content(self):
+        with patch.object(self.store, 'write_metadata', side_effect=OSError('metadata disk error')):
+            with self.assertRaises(OSError): self.store.save('new-skill', 'New skill', BODY)
+        self.assertFalse((self.store.root / 'new-skill').exists())
+
+        old = self.store.save('legacy', 'Legacy', BODY)
+        self.store.path('legacy').with_name('metadata.json').unlink()
+        with patch.object(self.store, 'write_metadata', side_effect=OSError('metadata disk error')):
+            with self.assertRaises(OSError):
+                self.store.save('legacy', 'Legacy', BODY + '\\nChanged', old['revision'])
+        self.assertEqual(self.store.read('legacy')['markdown'], old['markdown'])
+
     def test_curator_boundaries_usage_archive_restore(self):
         with patch('skills.time.time', return_value=1000):
             row = self.store.save('copy', 'Copies', BODY)
@@ -91,6 +110,41 @@ class Skills(unittest.TestCase):
         path.with_name('metadata.json').symlink_to(outside)
         with self.assertRaises(ValueError): self.store.use('copy')
         self.assertEqual(outside.read_text(), 'untouched')
+
+    def test_curator_provenance_pin_and_legacy_safety(self):
+        start = 5000
+        with patch('skills.time.time', return_value=start):
+            agent = self.store.save('agent-workflow', 'Agent workflow', BODY)
+            self.store.save('retired-workflow', 'Retired workflow', BODY)
+            self.store.save('manual-workflow', 'Manual workflow', BODY, created_by='user')
+            self.store.set_pinned('agent-workflow', agent['revision'], True)
+        with patch('skills.time.time', return_value=start + 40 * 86400):
+            visible = {row['name']: row for row in self.store.list()}
+            self.assertEqual(set(visible), {'manual-workflow', 'agent-workflow'})
+            self.assertEqual(visible['agent-workflow']['status'], 'pinned')
+            self.assertEqual(visible['manual-workflow']['status'], 'active')
+            archived = {row['name']: row for row in self.store.list(True)}
+            self.assertEqual(archived['retired-workflow']['status'], 'archived')
+            with self.assertRaises(ValueError): self.store.use('retired-workflow')
+            self.assertEqual(self.store.use('agent-workflow')['name'], 'agent-workflow')
+        with patch('skills.time.time', return_value=start + 71 * 86400):
+            self.assertEqual(self.store.curate('manual-workflow')['status'], 'active')
+            self.store.set_pinned('agent-workflow', agent['revision'], False)
+            self.assertEqual(self.store.curate('agent-workflow')['status'], 'archived')
+
+    def test_secret_scan_boundaries_and_orphans_do_not_consume_capacity(self):
+        self.store.save('legitimate', 'Normal workflow', BODY + '\\nPrefer risk-framework-tooling, task-0123456789abcdef and foo_sk-proj-abcdefghijklmnopqrstuvwx.')
+        orphan = self.store.root / 'aaa-orphan'
+        orphan.mkdir(parents=True)
+        (orphan / 'SKILL.md').write_text('x' * 13000, encoding='utf-8')
+        self.assertEqual([row['name'] for row in self.store.list()], ['legitimate'])
+        self.store.save('next', 'Another workflow', BODY)
+        with self.assertRaises(ValueError):
+            self.store.save('secret', 'Credential workflow', BODY + '\\nToken: sk-abcdefghijklmnopqrstuvwx')
+        for index, token in enumerate(('sk-proj-' + 'a' * 24, 'sk-ant-' + 'b' * 24)):
+            with self.assertRaises(ValueError):
+                self.store.save('provider-secret-' + str(index), 'Credential workflow', BODY + '\\nToken: ' + token)
+        self.assertFalse((self.store.root / 'secret').exists())
 
     def test_tools_and_parse(self):
         ws=Workspace(self.root/'workspaces'/'alice')
@@ -154,6 +208,10 @@ class SkillsHTTP(unittest.TestCase):
         saved=self.client.post('/skills',json=data); self.assertEqual(saved.status_code,200)
         self.assertEqual(len(self.client.get('/skills').json),1)
         self.assertEqual(self.client.get('/skills/copy').json['content'].strip(),BODY)
+        pinned = self.client.post('/skills/copy/pin', json={'revision': saved.json['revision'], 'pinned': True})
+        self.assertEqual(pinned.status_code, 200)
+        self.assertTrue(pinned.json['pinned'])
+        self.assertEqual(pinned.json['created_by'], 'user')
         self.assertEqual(self.webui.app.test_client().get('/skills').json,[])
         self.assertEqual(self.client.post('/skills',json=data).status_code,400)
         self.assertEqual(self.client.post('/skills/copy/restore',json={'revision':saved.json['revision']}).status_code,200)
