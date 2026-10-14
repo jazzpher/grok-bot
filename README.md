@@ -205,11 +205,25 @@ Do not regenerate the source using the model: characters may change.
 Use compare_files. Only MATCH means the bytes are identical.
 ```
 
-Limits: 30 skills per session, 12 KB each, no supporting scripts. Writes are
+Limits: 500 non-archived skills per session, 12 KB each, no supporting scripts. Writes are
 atomic; path traversal/symlinks are rejected; common key/private-key patterns
 are blocked. That scan is not a complete secret detector. Do not save passwords,
 keys, uploaded documents, personal examples or raw chat logs. Skill contents
 are untrusted advice and cannot grant authority or bypass tool constraints.
+The automatic prompt index includes at most 30 visible skills and 6000 UTF-8
+bytes total (not full Markdown), selected by goal word matches, then pinned
+status, recent use and name. This is deterministic, with no extra model calls.
+Other skills remain stored and loadable by name. The Task loop `list_skills`
+tool returns up to 20 name/description/status entries per bounded page; use
+`text` for an optional keyword search and `path` for an offset string ("0"
+initially, then the returned `next_offset`). Search matches any whole word in
+the name/description, not the full skill body. The Skills panel and HTTP list
+still show all non-archived entries plus all archived entries. Archived entries
+do not count
+against the 500 limit but remain excluded from agent discovery until restored.
+Restore is refused if all 500 slots are occupied. Archived files still use disk
+space and have no separate count limit; delete unwanted archives manually.
+
 No changes were made to reasoning visibility or the existing task log policy.
 
 Test without paid calls: `python -m unittest discover -v`, `node test_ui.cjs`,
@@ -234,7 +248,8 @@ Skills, listing the index or reading the editor does not count as use.
 - A small `metadata.json` beside SKILL.md stores creation time, last use, use
   count and archive state. The panel shows active/stale/archived status.
 - Editing an archived skill does not automatically reactivate it. Restore it
-  explicitly. Archived skills still count toward the 30-skill storage limit.
+  explicitly. Archived skills no longer count toward the 500-skill limit. Restoring one
+  requires a free non-archived slot.
 
 No model-based consolidation, rewrites or deletion is included. If the server
 was off at the 30-day mark, archiving is applied on the next library access.

@@ -159,7 +159,7 @@ class TaskManager:
         tid = secrets.token_hex(16)
         context_rules = '\n'.join(m['content'] for m in history if m.get('role') == 'system')
         past = [m for m in history if m.get('role') != 'system'][-24:]
-        state = {'steps': 0, 'messages': [{'role': 'system', 'content': context_rules + '\n' + workspace.skills.index_context() + '\n' + RULES},
+        state = {'steps': 0, 'messages': [{'role': 'system', 'content': context_rules + '\n' + workspace.skills.index_context(goal) + '\n' + RULES},
                   *past, {'role': 'user', 'content': goal}], 'written': [], 'checked': [],
                  'pending': None, 'budgets': limits, 'elapsed': 0, 'output': 0, 'retry_streak': 0,
                  'failure_signature': None, 'failure_count': 0}
