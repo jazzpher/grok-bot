@@ -254,7 +254,7 @@ class DisabledBackend:
         return False
 
     def run(self, *a, **k):
-        raise RuntimeError('Command execution is disabled (GROK_SANDBOX=off).')
+        raise RuntimeError('Command execution is disabled (GROK_SANDBOX_BACKEND=off).')
 
 
 def _bound(raw, limit=None):

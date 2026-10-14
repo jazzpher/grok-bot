@@ -53,10 +53,11 @@ Example `mcp.json` (copy `mcp.example.json`):
 }}
 ```
 
-Sandbox backends: `subprocess` (default — commands run as your user inside the
-workspace with keys scrubbed from the environment; **not** an isolation boundary)
-or `docker` (`GROK_SANDBOX_BACKEND=docker`, no network unless the policy allows it,
-workspace bind-mounted, read-only root). `docker compose up` runs the whole app in a
+Docker is **optional**. Sandbox backends (`GROK_SANDBOX_BACKEND`, default `auto` = `docker` when the
+docker CLI is installed, otherwise `subprocess`): `subprocess` — commands run as your user inside the
+workspace with keys scrubbed from the environment; **not** an isolation boundary — or `docker` — one
+throwaway container per command, no network unless the policy allows it, workspace bind-mounted,
+read-only root, command timeout enforced inside the container. `off` disables `run_command` entirely. `docker compose up` runs the whole app in a
 container, which is the recommended way to let it work on untrusted code.
 
 Configuration (environment): `GROK_API_KEY`, `GROK_API_URL`, `GROK_MODEL`,

@@ -52,7 +52,9 @@ KEEP_RECENT_MESSAGES = 8      # always keep the newest messages verbatim after c
 TOOL_MODE = _choice('GROK_TOOL_MODE', 'auto', ('auto', 'native', 'json'))
 
 # Sandbox
-SANDBOX_BACKEND = _choice('GROK_SANDBOX', 'auto', ('auto', 'docker', 'subprocess', 'off'))
+# GROK_SANDBOX_BACKEND is the documented name; GROK_SANDBOX is accepted as a short alias.
+SANDBOX_BACKEND = _choice('GROK_SANDBOX_BACKEND' if os.environ.get('GROK_SANDBOX_BACKEND') else 'GROK_SANDBOX', 'auto',
+                          ('auto', 'docker', 'subprocess', 'off'))
 SANDBOX_IMAGE = os.environ.get('GROK_SANDBOX_IMAGE', 'python:3.12-slim')
 COMMAND_TIMEOUT = _int('GROK_COMMAND_TIMEOUT', 120, 1)
 COMMAND_MAX_OUTPUT = _int('GROK_COMMAND_MAX_OUTPUT', 60000, 1000)

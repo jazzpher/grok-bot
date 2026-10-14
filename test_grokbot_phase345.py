@@ -549,6 +549,27 @@ class WebRoutesTest(unittest.TestCase):
             webui.parse_skill_markdown('no front matter', '')
 
 
+class SandboxEnvNamesTest(unittest.TestCase):
+    def _reload_with(self, env):
+        import importlib
+        with mock.patch.dict(os.environ, env, clear=False):
+            for key in ('GROK_SANDBOX_BACKEND', 'GROK_SANDBOX'):
+                if key not in env:
+                    os.environ.pop(key, None)
+            importlib.reload(gconfig)
+            return gconfig.SANDBOX_BACKEND
+
+    def test_documented_name_and_alias_are_both_honoured(self):
+        import importlib
+        try:
+            self.assertEqual(self._reload_with({'GROK_SANDBOX_BACKEND': 'off'}), 'off')
+            self.assertEqual(self._reload_with({'GROK_SANDBOX': 'subprocess'}), 'subprocess')
+            self.assertEqual(self._reload_with({'GROK_SANDBOX_BACKEND': 'docker', 'GROK_SANDBOX': 'off'}), 'docker', 'documented name wins')
+            self.assertEqual(self._reload_with({'GROK_SANDBOX_BACKEND': 'bogus'}), 'auto')
+        finally:
+            importlib.reload(gconfig)
+
+
 class LocalProviderTest(unittest.TestCase):
     def test_local_preset_only_when_configured(self):
         self.assertNotIn('local', webui.PROVIDERS)
