@@ -1,5 +1,5 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
-const code=fs.readFileSync(__dirname+'/webui.py','utf8').split('<script>')[1].split('</script>')[0];
+const code=fs.readFileSync(__dirname+'/static/app.js','utf8');
 function setup(fetch){const elements={};
  const mk=()=>({value:'',textContent:'',children:[],disabled:false,isConnected:true,style:{},className:'',
   classList:{_s:new Set(),add(...a){a.forEach(x=>this._s.add(x))},remove(...a){a.forEach(x=>this._s.delete(x))},toggle(x){this._s.has(x)?this._s.delete(x):this._s.add(x);return this._s.has(x)},contains(x){return this._s.has(x)}},
@@ -7,7 +7,7 @@ function setup(fetch){const elements={};
   addEventListener(n,f){this[n]=f}});
  const el=id=>elements[id]||=mk();
  const ctx={console,Set,Map,JSON,Promise,TextDecoder,fetch,setTimeout:f=>f(),document:{getElementById:el,createElement:mk}};
- vm.createContext(ctx);for(const n of ['keyin','urlin','modelin','inp','wrap','chat'])ctx[n]=el(n);vm.runInContext(code.replace('restoreTasks();','').replace('restoreHistory();',''),ctx);return {ctx,el}}
+ vm.createContext(ctx);for(const n of ['keyin','urlin','modelin','inp','wrap','chat'])ctx[n]=el(n);vm.runInContext(code.replace('restoreTasks();','').replace('restoreHistory();','').replace('loadPolicy();','').replace('refreshKeyStatus();\n',''),ctx);return {ctx,el}}
 const resp=(obj,ok=true)=>({ok,json:async()=>obj,text:async()=>typeof obj==='string'?obj:JSON.stringify(obj)});
 const PRESETS=[{id:'gemini',label:'Google Gemini',url:'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',model_hint:'gemini-flash-latest'},
  {id:'nvidia',label:'NVIDIA NIM',url:'https://integrate.api.nvidia.com/v1/chat/completions',model_hint:''}];

@@ -116,8 +116,10 @@ class HTTPHarnessTests(unittest.TestCase):
 
     def test_ui_has_restore_resume_and_explicit_checks(self):
         page = self.a.get(self.url+'/').text
-        self.assertIn('restoreTasks()', page)
-        self.assertIn('resumeTask', page)
+        self.assertIn('/static/app.js', page)
+        script = self.a.get(self.url+'/static/app.js').text
+        self.assertIn('restoreTasks()', script)
+        self.assertIn('resumeTask', page + script)
         self.assertIn('checks', page)
         for payload in ([], None, {'message':'x','checks':[{'type':'semantic'}]}):
             self.assertEqual(self.a.post(self.url+'/task', json=payload).status_code, 400)

@@ -1,8 +1,77 @@
 # grok-bot
 
-A small Python web chat with a bounded task agent. Use Gemini or xAI through
-an OpenAI-compatible endpoint. The name does not mean it runs the Grok model:
-the provider and model you configure determine what answers.
+A local, tool-using chat/coding agent with a web UI and a CLI, for any
+OpenAI-compatible provider (Gemini, xAI, NVIDIA NIM, OpenRouter, Groq, Cerebras,
+Mistral, DeepSeek, or a custom https endpoint). The name does not mean it runs
+the Grok model: the provider and model you configure determine what answers.
+
+**What the agent can do (0.9):** read, search and edit files in a per-session
+workspace; run shell commands in a sandbox with a Codex-style policy
+(`read-only` / `workspace-write` / `full-access` × `on-request` / `never`
+approvals, persisted "always allow" rules); fetch pages and search the web;
+**remember durable facts** (long-term memory, injected per turn, editable in the
+UI); search its own earlier conversations; remember and reuse skills (export /
+import as zip); **delegate** sub-tasks to isolated sub-agents; **schedule**
+prompts ("every weekday at 09:00 check CI") that run unattended; call tools from
+**MCP servers** (stdio or Streamable HTTP, `mcp.json`); accept **image
+attachments** for vision models; and be driven from the web UI, the terminal,
+`exec` in CI, or **Telegram** (allowlisted ids only). Plugins can add tools and
+hooks without forking. Native tool calling is used when the provider supports
+it, with an automatic JSON-protocol fallback when it does not. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/SECURITY.md](docs/SECURITY.md)
+and the honest [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
+
+```
+python -m grokbot chat                          # terminal agent in the current directory
+python -m grokbot exec "run the tests and fix the failure" --json   # CI / scripts
+python webui.py                                 # web UI on http://127.0.0.1:5000
+python -m grokbot telegram                      # Telegram gateway only (token + allowlist via env)
+python -m grokbot exec --mock "hello"           # offline smoke test, no key needed
+```
+
+### Memory, automations, sub-agents, MCP, Telegram (0.9)
+
+| Feature | How it works | Where |
+|---|---|---|
+| Long-term memory | `save_memory` / `search_memory` / `forget_memory` tools; pinned + relevant memories are added to the system prompt each turn; the *Context* row under each reply shows exactly what was injected | **Memory** panel, `/memory`, `/remember <fact>`, `GET/POST /memories` |
+| Session search | `search_history` / `read_history` tools over the FTS5 conversation store | automatic |
+| Sub-agents | `delegate(task, context, max_steps)` runs an isolated turn with its own context and a reduced tool set (no memory writes, no nested delegation beyond `GROK_MAX_SUBAGENT_DEPTH`); its tool calls stream as a nested card | automatic |
+| Automations | `schedule_task` tool or the **Automations** panel: `every day at 08:00`, `every 2 hours`, `every monday at 9:00`, `in 30 minutes`, `tomorrow at 09:00`, or 5-field cron. Runs are *unattended*: approval policy forced to `never`, step budget `GROK_SCHEDULED_MAX_STEPS` (25); each run becomes a ⏰ conversation and a notification | `/schedules`, `GET/POST /schedules` |
+| MCP client | `mcp.json` (or `GROK_MCP_CONFIG`) with `{"mcpServers": {"name": {"command", "args", "env"} or {"url", "headers"}}}`; tools appear as `mcp__<server>__<tool>`; `readOnlyHint`/`destructiveHint` annotations feed the approval policy | Settings → Integrations, `GET /mcp`, `POST /mcp/reload` |
+| Telegram | `GROK_TELEGRAM_TOKEN` + `GROK_TELEGRAM_ALLOWED_IDS=123,456` (fails closed without the allowlist). Long polling, streamed replies, approval buttons, `/new /stop /policy /status /help`; owner `tg:<chat_id>` with its own workspace, memory and policy | `python webui.py` starts it, or `python -m grokbot telegram` |
+| Plugins | `GROK_PLUGINS=my_module,other` — modules with `register(registry)`, `before_tool`, `after_tool`, `on_turn_end` hooks | — |
+| Local models | `GROK_LOCAL_API_URL=http://127.0.0.1:11434/v1/chat/completions` (Ollama, LM Studio, vLLM, llama.cpp) adds a *Local model* provider; no key needed | Settings → Provider |
+| Images | attach PNG/JPEG/WebP/GIF (drag-drop, paste or 🖼) — sent as `image_url` parts to vision-capable models | composer |
+| UI | per-conversation URLs (`/c/<id>`), Markdown/JSON export, in-composer model switch, theme toggle, installable (PWA manifest), dictation via the Web Speech API when the browser has it | — |
+
+Example `mcp.json` (copy `mcp.example.json`):
+
+```json
+{"mcpServers": {
+  "filesystem": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data"]},
+  "remote":     {"url": "https://mcp.example.com/mcp", "headers": {"Authorization": "Bearer …"}}
+}}
+```
+
+Docker is **optional**. Sandbox backends (`GROK_SANDBOX_BACKEND`, default `auto` = `docker` when the
+docker CLI is installed, otherwise `subprocess`): `subprocess` — commands run as your user inside the
+workspace with keys scrubbed from the environment; **not** an isolation boundary, so every command asks for approval — or `docker` — one
+throwaway container per command, no network unless the policy allows it, workspace bind-mounted,
+read-only root, command timeout enforced inside the container. `off` disables `run_command` entirely. `docker compose up` runs the whole app in a
+container, which is the recommended way to let it work on untrusted code.
+
+Configuration (environment): `GROK_API_KEY`, `GROK_API_URL`, `GROK_MODEL`,
+`GROK_SANDBOX_BACKEND`, `GROK_SANDBOX_IMAGE`, `GROK_MAX_STEPS` (default 40),
+`GROK_CONTEXT_TOKENS` (default 128000, auto-filled from the model list when
+available), `GROK_SEARCH_BACKEND` (`auto`/`tavily`/`brave`/`searxng`/`duckduckgo`/`off`)
+with `TAVILY_API_KEY` / `BRAVE_API_KEY` / `GROK_SEARXNG_URL`, `GROK_MAX_FILE_BYTES`
+(10 MB), `GROK_MAX_WORKSPACE_BYTES` (500 MB), `GROK_MAX_FILES` (2000),
+`GROK_MAX_SUBAGENT_DEPTH` (1), `GROK_SCHEDULER_TICK` (30 s), `GROK_SCHEDULER_MAX_JOBS`
+(100), `GROK_SCHEDULED_MAX_STEPS` (25), `GROK_MCP_CONFIG`, `GROK_MCP_CONNECT_TIMEOUT`
+(20 s), `GROK_MCP_CALL_TIMEOUT` (90 s), `GROK_TELEGRAM_TOKEN`, `GROK_TELEGRAM_ALLOWED_IDS`,
+`GROK_PLUGINS`, `GROK_LOCAL_API_URL` / `GROK_LOCAL_MODEL`, `GROK_MEMORY_DB`,
+`GROK_SCHEDULE_DB`. Project rules in `AGENTS.md` / `GROKBOT.md` / `CLAUDE.md` at the
+workspace root are added to the system prompt.
 
 ## Run locally
 
@@ -14,11 +83,13 @@ export GROK_MODEL='gemini-flash-latest'
 python webui.py
 ```
 
-Open http://127.0.0.1:5000. Chat mode streams replies as before. Task loop mode
-plans, uses a tool, sees its output and chooses the next step in a durable
-background worker. [HARNESS.md](HARNESS.md) documents checks, resume, API,
-budgets, persistence, retention and deployment limits. Completion requires
-explicit supported artifact checks; a budget stop is never success.
+Open http://127.0.0.1:5000. The composer talks to the unified agent (`POST /agent`):
+replies stream as Markdown, tool calls appear as cards, and anything that crosses
+the sandbox policy pauses for your approval. **Advanced → Run as durable background
+task** still uses the original restart-safe harness with explicit artifact checks;
+[HARNESS.md](HARNESS.md) documents checks, resume, API, budgets, persistence,
+retention and deployment limits. Completion there requires explicit supported
+artifact checks; a budget stop is never success.
 
 Settings has a provider picker: choose a trusted OpenAI-compatible provider
 (Google Gemini, NVIDIA NIM, OpenRouter, Groq, Cerebras, Mistral, DeepSeek, xAI
@@ -102,13 +173,15 @@ Example: "Calculate 17 x 23, save the result in answer.txt, and read it back
 to check it." Supply checks JSON `[{"type":"file_text","path":"answer.txt","text":"391"}]`.
 Click Workspace files to download the result.
 
-This is NOT a browser/computer-control agent. It cannot run shell commands,
-install packages, browse the web, send messages, buy things, or reach your
-computer's files. Completion verifies only the explicit supported byte checks,
-not every possible semantic goal. Review generated content.
+The section above describes the durable background harness. The interactive agent
+can additionally run shell commands (under the sandbox policy), fetch pages and
+search the web; it still cannot control your browser, send messages, buy things,
+or reach files outside its workspace unless you choose `full-access`. Completion of
+background tasks verifies only the explicit supported byte checks, not every
+possible semantic goal. Review generated content.
 
-Files are limited to 25 per session, 32 KB per file and 256 KB total. Paths
-cannot escape the workspace. Existing files in that workspace can be
+Files are limited per session (defaults: 2000 files, 10 MB per file, 500 MB
+total; configurable with `GROK_MAX_*`). Paths cannot escape the workspace. Existing files in that workspace can be
 replaced by a task. Download important results. New chat clears only your
 conversation, not workspace files or task evidence. Last 24 chat entries and
 task trajectories persist in SQLite. Set a stable GROK_SESSION_SECRET to keep

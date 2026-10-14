@@ -1,24 +1,39 @@
 #!/usr/bin/env python3
 """Local chat and bounded tasks. Public exposure requires GROK_APP_PASSWORD."""
 import argparse
+import atexit
+import collections
+import dataclasses
 import hmac
+import io
 import ipaddress
 import json
 import os
+import re
 import secrets
 import socket
 import threading
 import time
+import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
 import requests
-from flask import Flask, Response, request, render_template_string, session, redirect, send_file
+from flask import Flask, Response, request, render_template, render_template_string, session, redirect, send_file
 from agent_loop import ACTION_SCHEMA, Workspace, run_loop
 from documents import extract_text, MAX_UPLOAD
 from werkzeug.utils import secure_filename
 from task_harness import OutputBudgetExceeded, TaskManager, MAX_RETRIES, is_transient, friendly_provider_error
 import task_harness
 import model_discovery
+import grokbot
+from grokbot import agent as agent_core, compaction, config as gconfig, netguard, providers as provider_client, sandbox as sandbox_mod
+from grokbot.approvals import ApprovalBroker, PolicyStore, SandboxPolicy, MODES as SANDBOX_MODES, APPROVALS as APPROVAL_MODES
+from grokbot.conversations import ConversationStore
+from grokbot.memory import MemoryStore
+from grokbot.scheduler import Scheduler, ScheduleError
+from grokbot.mcp import MCPManager
+from grokbot.tools import ToolContext, default_registry
+from grokbot.tools.web import search_backend
 
 API_URL = os.environ.get('GROK_API_URL', 'https://api.x.ai/v1/chat/completions')
 DEFAULT_MODEL = os.environ.get('GROK_MODEL', 'grok-4-fast')
@@ -43,672 +58,35 @@ PROVIDER_ROWS = [
 PROVIDERS = {pid: {'label': label, 'url': url, 'model_hint': hint}
              for pid, label, url, hint in PROVIDER_ROWS}
 ALLOWED_API_URLS = {p['url'] for p in PROVIDERS.values()}
-# A local provider may be configured by the server owner, never through public settings.
-if urlparse(API_URL).hostname in ('127.0.0.1', 'localhost'):
-    ALLOWED_API_URLS.add(API_URL)
+# A local provider (Ollama, LM Studio, vLLM, llama.cpp…) may be configured by the server owner through the
+# environment, never through public settings: GROK_LOCAL_API_URL=http://127.0.0.1:11434/v1/chat/completions
+LOCAL_API_URL = os.environ.get('GROK_LOCAL_API_URL', '').strip()
+if not LOCAL_API_URL and urlparse(API_URL).hostname in ('127.0.0.1', 'localhost'):
+    LOCAL_API_URL = API_URL
+if LOCAL_API_URL and urlparse(LOCAL_API_URL).scheme in ('http', 'https'):
+    PROVIDERS['local'] = {'label': 'Local model (' + (urlparse(LOCAL_API_URL).hostname or 'local') + ')', 'url': LOCAL_API_URL,
+                          'model_hint': os.environ.get('GROK_LOCAL_MODEL', '')}
+    ALLOWED_API_URLS.add(LOCAL_API_URL)
+    model_discovery.MODEL_URLS['local'] = re.sub(r'/chat/completions/?$', '/models', LOCAL_API_URL)
 # Key prefixes that identify a provider when neither provider nor URL is given.
 KEY_PREFIXES = (('AIza', 'gemini'), ('AQ.', 'gemini'), ('nvapi-', 'nvidia'),
                 ('sk-or-', 'openrouter'), ('gsk_', 'groq'))
 # Custom https endpoints validated at save time. Memory-only, guarded by provider_lock.
 custom_endpoints = set()
 
-PAGE = r"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>grok-bot · Chat and Tasks</title>
-<style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-         background: #0e1114; color: #e6e9ec; height: 100dvh; overflow: hidden; }
-  button { font-family: inherit; }
-  #app { display: flex; height: 100dvh; }
-  #sidebar { width: 232px; flex: none; background: #10141a; border-right: 1px solid #1e242c;
-             display: flex; flex-direction: column; padding: 10px 8px; overflow-y: auto; }
-  .brand { font-size: 15px; font-weight: 650; letter-spacing: -.2px; padding: 4px 10px 12px; }
-  .side-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
-               background: transparent; border: 0; color: #d6dbe1; font-size: 12.5px;
-               padding: 7px 10px; border-radius: 8px; cursor: pointer; }
-  .side-item:hover { background: #1a2027; }
-  .side-item.primary { color: #4cc38a; font-weight: 600; }
-  .side-label { font-size: 10px; letter-spacing: 1px; text-transform: uppercase;
-                color: #6b7480; padding: 14px 10px 4px; }
-  .side-note { font-size: 10.5px; color: #5b636d; padding: 0 10px 6px; }
-  #taskselect { width: calc(100% - 4px); margin: 2px; background: #151a21; color: #d6dbe1;
-                border: 1px solid #242c35; border-radius: 8px; padding: 6px 8px; font-size: 11px; }
-  .side-foot { margin-top: auto; padding: 10px 10px 2px; font-size: 10.5px; color: #5b636d; }
-  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  #topbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px;
-            border-bottom: 1px solid #1c222a; }
-  #menu { display: none; background: transparent; border: 0; color: #d6dbe1; font-size: 16px;
-          cursor: pointer; padding: 2px 6px; }
-  #crumb { font-size: 12px; color: #8b949c; }
-  #status { margin-left: auto; color: #6b7480; font-size: 11px; }
-  #settings { display: none; padding: 10px 16px; border-bottom: 1px solid #1c222a;
-              flex-wrap: wrap; gap: 8px; align-items: center; }
-  #settings.open { display: flex; }
-  #settings input, #settings select { background: #10151b; color: #e6e9ec; border: 1px solid #242c35;
-                    border-radius: 8px; padding: 8px 10px; font-size: 12px; flex: 1; min-width: 150px; }
-  #settings input:focus { outline: none; border-color: #4cc38a; }
-  #settings button { background: #1a2027; color: #d6dbe1; border: 1px solid #242c35;
-                     border-radius: 8px; padding: 8px 12px; cursor: pointer; font-size: 12px; }
-  #keystatus { color: #6b7480; font-size: 11px; }
-  #keymask { width: 100%; color: #8b949c; font-size: 11px; }
-  #keymask b { color: #d6dbe1; font-weight: 600; font-family: ui-monospace, Consolas, monospace; }
-  #keystatus.ok { color: #4cc38a; } #keystatus.bad { color: #e5766b; }
-  #settings button:disabled { opacity: .6; cursor: default; }
-  .dots::after { content: ''; animation: dots 1.2s steps(4, end) infinite; }
-  @keyframes dots { 0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; } }
-  .resume-btn { display: block; margin-top: 8px; background: #1a2027; color: #4cc38a; border: 1px solid #2c4a3b;
-                border-radius: 8px; padding: 8px 14px; font-size: 12px; cursor: pointer; }
-  .resume-btn:disabled { opacity: .6; }
-  #skillsPanel { padding: 12px 16px; border-bottom: 1px solid #1c222a; max-height: 55vh;
-                 overflow: auto; font-size: 12px; }
-  #skillsPanel p { color: #8b949c; font-size: 11px; margin: 6px 0; }
-  #skillsPanel input, #skillsPanel select, #skillsPanel textarea {
-    background: #10151b; color: #e6e9ec; border: 1px solid #242c35; border-radius: 8px;
-    padding: 7px 9px; font-size: 12px; }
-  #skillsPanel button { background: #1a2027; color: #d6dbe1; border: 1px solid #242c35;
-                        border-radius: 8px; padding: 6px 10px; cursor: pointer; font-size: 11.5px; }
-  #skillstatus { color: #6b7480; font-size: 11px; margin-left: 8px; }
-  #chatwrap { flex: 1; overflow-y: auto; }
-  #chat { max-width: 860px; margin: 0 auto; padding: 14px 6px 6px; display: flex;
-          flex-direction: column; gap: 4px; }
-  .msg { width: 100%; white-space: pre-wrap; line-height: 1.55; font-size: 13px;
-         padding: 7px 12px; border-radius: 8px; word-break: break-word; }
-  .you { background: #1b2735; }
-  .grok { background: transparent; }
-  .tasklog { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-             font-size: 11px; line-height: 1.5; color: #9aa4ae; background: #10151b;
-             border: 1px solid #20272f; margin: 4px 0; }
-  .tasklog.done { max-height: 40px; overflow: hidden; cursor: pointer; position: relative; }
-  .tasklog.done:not(.open)::after { content: "click to expand"; position: absolute; right: 8px;
-             bottom: 3px; color: #4cc38a; background: #10151b; padding-left: 8px; font-size: 10px; }
-  .tasklog.done.open { max-height: none; }
-  .hint { text-align: center; color: #6b7480; font-size: 11px; padding: 16px 8px; }
-  .chip { display: inline-block; background: #151a21; border: 1px solid #242c35;
-          border-radius: 6px; padding: 3px 8px; margin: 2px 4px 2px 0; font-size: 11px;
-          color: #9ac6ff; text-decoration: none; }
-  #bar { padding: 8px 6px calc(8px + env(safe-area-inset-bottom)); }
-  #composer { max-width: 860px; margin: 0 auto; background: #141a21; border: 1px solid #28313c;
-              border-radius: 14px; padding: 4px 10px 6px; }
-  #composer:focus-within { border-color: #3a4552; }
-  #in { width: 100%; background: transparent; border: 0; color: #e6e9ec; font-size: 16px;
-        resize: none; font-family: inherit; padding: 8px 2px 4px; max-height: 140px; }
-  #in:focus { outline: none; }
-  #composer-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
-  .tool { background: transparent; border: 0; color: #8b949c; font-size: 11.5px; cursor: pointer;
-          padding: 5px 7px; border-radius: 6px; }
-  .tool:hover { background: #1c232c; color: #e6e9ec; }
-  #mode { background: transparent; color: #8b949c; border: 0; font-size: 11.5px; cursor: pointer; }
-  #checks { flex: 1; min-width: 120px; display: none; background: #10151b;
-            border: 1px solid #242c35; color: #9aa4ae; border-radius: 6px;
-            padding: 5px 7px; font-size: 10.5px; }
-  #requirements { display: none; min-width: 160px; flex: 1; background: #10151b; color: #9aa4ae; border: 1px solid #242c35; border-radius: 6px; padding: 5px 7px; }
-  #composer.taskmode #checks, #composer.taskmode #requirements { display: block; }
-  #stop:disabled { opacity: .35; cursor: default; }
-  #send { margin-left: auto; width: 30px; height: 30px; flex: none; border-radius: 50%; border: 0;
-          cursor: pointer; background: #4cc38a; color: #052e1e; font-size: 14px; font-weight: 700; }
-  #send:disabled { background: #242c35; color: #6b7480; cursor: default; }
-  @media (max-width: 720px) {
-    #menu { display: block; }
-    #sidebar { position: fixed; z-index: 20; top: 0; bottom: 0; left: 0;
-               transform: translateX(-100%); transition: transform .15s ease; }
-    #sidebar.open { transform: none; box-shadow: 0 0 48px #000c; }
-    #chat { padding: 12px 12px 6px; }
-    .msg { font-size: 10px; padding: 6px 10px; }
-    .tasklog { font-size: 9.5px; }
-    #bar { padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); }
-  }
-</style>
-</head>
-<body>
-<div id="app">
-<aside id="sidebar">
-  <div class="brand">grok-bot</div>
-  <button class="side-item primary" onclick="clearChat()">+ New session</button>
-  <button class="side-item" onclick="toggleSkills()">Capabilities</button>
-  <button class="side-item" onclick="showFiles()">Artifacts</button>
-  <button class="side-item" onclick="toggleSettings()">Settings</button>
-  <div class="side-label">Tasks</div>
-  <div class="side-note">Saved task-loop runs</div>
-  <select id="taskselect" aria-label="Saved task"></select>
-  <button class="side-item" onclick="resumeTask()">Resume selected task</button>
-  <div class="side-foot">Runs locally · free models only</div>
-</aside>
-<main>
-  <div id="topbar">
-    <button id="menu" onclick="toggleSidebar()" aria-label="Open menu">☰</button>
-    <span id="crumb">Chat</span>
-    <span id="status" role="status" aria-live="polite">Ready</span>
-  </div>
-  <div id="settings">
-    <select id="providersel" aria-label="Provider" onchange="providerChanged()"></select>
-    <input id="keyin" oninput="discoveryChanged()" type="password" placeholder="API key" autocomplete="off">
-    <input id="urlin" oninput="discoveryChanged()" placeholder="Custom API URL (public https only)" autocomplete="off" style="display:none">
-    <input id="modelsurl" aria-label="Custom models URL" placeholder="Models URL (explicit, same origin as chat URL)" oninput="discoveryChanged()" style="display:none">
-    <select id="modelsel" aria-label="Discovered models" onchange="selectDiscoveredModel()"><option value="">Choose a listed model (optional)</option></select>
-    <button id="refreshmodels" onclick="refreshModels(true)">Refresh models</button>
-    <span id="modelstatus" role="status" aria-live="polite">Listed does not mean chat support or free quota. Manual entry always works.</span>
-    <input id="modelin" aria-label="Model" placeholder="Model (optional, blank = auto)" autocomplete="off">
-    <small style="flex-basis:100%">Listing is not a chat test or a free-quota guarantee. Choose explicitly, then Save. Manual entry always works.</small>
-    <button onclick="saveKey()">Save</button>
-    <button id="testbtn" onclick="testKey()">Test</button>
-    <span id="keystatus" role="status" aria-live="polite"></span>
-    <div id="keymask">No key saved yet.</div>
-  </div>
-  <section id="skillsPanel" hidden>
-    <strong>Saved skills</strong>
-    <p>Reusable workflows, private to this browser session. Max 500 non-archived skills, 12 KB each. Archives do not use a slot; restoring needs a free slot. Task loop can save and load them. No background model calls; skill actions use normal task steps. New chat keeps skills. Agent-created skills become stale after 14 unused days and archive after 30; pinned, manually created and legacy skills are never auto-archived. Archived files remain on disk and can be restored.</p>
-    <select id="skillselect" aria-label="Saved skill" onchange="loadSkill()"><option value="">New skill</option></select>
-    <button onclick="refreshSkills()">Refresh</button>
-    <button onclick="newSkill()">New skill</button>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0">
-      <input id="skillname" aria-label="Skill name" placeholder="skill-name" maxlength="64">
-      <input id="skilldescription" aria-label="Skill description" placeholder="When to use it" maxlength="160" style="flex:1;min-width:180px">
-    </div>
-    <textarea id="skillcontent" aria-label="Skill Markdown" rows="8" style="width:100%" placeholder="## When to use
-## Steps
-## Pitfalls
-## Verification"></textarea>
-    <button onclick="saveSkill()">Save skill</button>
-    <button onclick="restoreSkill()">Restore selected skill</button>
-    <button onclick="togglePinSkill()">Pin / unpin selected skill</button>
-    <button onclick="deleteSkill()">Delete selected skill</button>
-    <span id="skillstatus" role="status" aria-live="polite"></span>
-  </section>
-  <div id="chatwrap"><div id="chat"><div class="hint">Chat or run a task. Tasks can calculate and read/write small workspace files. No browsing or computer control.</div></div></div>
-  <div id="bar">
-    <div id="composer">
-      <textarea id="in" rows="1" placeholder="Start with a goal" autofocus></textarea>
-      <div id="composer-row">
-        <label class="tool" title="Upload file">+ <input id="upload" type="file" style="display:none" aria-label="Upload document" accept=".txt,.md,.csv,.json,.py,.js,.html,.css,.pdf,.docx" onchange="uploadFile(this)"></label>
-        <select id="mode" title="Mode"><option value="chat">Chat</option><option value="task">Task loop</option></select>
-        <input id="checks" aria-label="Artifact checks JSON" placeholder='Checks JSON: [{"type":"file_text","path":"out.txt","text":"hello"}]'>
-        <input id="requirements" aria-label="Generation requirements" placeholder="Generation requirements: language, format, content, tone (optional)">
-        <button id="stop" class="tool" onclick="stopTask()" disabled>■ Stop</button>
-        <button id="send" onclick="send()" title="Send" aria-label="Send">↑</button>
-      </div>
-    </div>
-  </div>
-</main>
-</div>
-<script>
-const chat = document.getElementById('chat');
-const wrap = document.getElementById('chatwrap');
-const inp = document.getElementById('in');
-const sendBtn = document.getElementById('send');
-let skillRevision = '';
-let skillPinned = false;
-function newSkill() {
-  for (const id of ['skillname','skilldescription','skillcontent','skillselect']) document.getElementById(id).value = '';
-  document.getElementById('skillname').disabled = false;
-  skillRevision = ''; skillPinned = false; document.getElementById('skillstatus').textContent = 'New workflow';
-}
-async function refreshSkills() {
-  try {
-    const res = await fetch('/skills'); if (!res.ok) throw new Error(await res.text());
-    const rows = await res.json(); const sel = document.getElementById('skillselect');
-    const selected = sel.value; sel.replaceChildren();
-    const blank = document.createElement('option'); blank.value = ''; blank.textContent = 'New skill'; sel.appendChild(blank);
-    for (const row of rows) { const op = document.createElement('option'); op.value = row.name; op.textContent = row.name + ' [' + row.status + '] - ' + row.description; sel.appendChild(op); }
-    sel.value = rows.some(r => r.name === selected) ? selected : '';
-    document.getElementById('skillstatus').textContent = rows.filter(r => r.status !== 'archived').length + '/500 non-archived, ' + rows.filter(r => r.status === 'archived').length + ' archived';
-  } catch(e) { document.getElementById('skillstatus').textContent = e.message; }
-}
-async function toggleSkills() {
-  const panel = document.getElementById('skillsPanel'); panel.hidden = !panel.hidden;
-  if (!panel.hidden) await refreshSkills();
-}
-async function loadSkill() {
-  const name = document.getElementById('skillselect').value; if (!name) {newSkill(); return;}
-  try {
-    const res = await fetch('/skills/' + encodeURIComponent(name)); if (!res.ok) throw new Error(await res.text());
-    const row = await res.json();
-    document.getElementById('skillname').value = row.name; document.getElementById('skillname').disabled = true;
-    document.getElementById('skilldescription').value = row.description; document.getElementById('skillcontent').value = row.content;
-    skillRevision = row.revision; skillPinned = !!row.pinned; document.getElementById('skillstatus').textContent = 'Loaded workflow (' + row.status + ', ' + (row.created_by || 'legacy') + ')';
-  } catch(e) {document.getElementById('skillstatus').textContent = e.message;}
-}
-async function saveSkill() {
-  try {
-    const res = await fetch('/skills', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-      name:document.getElementById('skillname').value, description:document.getElementById('skilldescription').value,
-      content:document.getElementById('skillcontent').value, revision:skillRevision})});
-    if (!res.ok) throw new Error(await res.text());
-    const row = await res.json(); skillRevision = row.revision; await refreshSkills();
-    document.getElementById('skillselect').value = row.name; await loadSkill();
-    document.getElementById('skillstatus').textContent = 'Saved and read back: ' + row.name;
-  } catch(e) {document.getElementById('skillstatus').textContent = e.message;}
-}
-async function restoreSkill() {
-  const name = document.getElementById('skillselect').value; if (!name) return;
-  try {
-    const res = await fetch('/skills/' + encodeURIComponent(name) + '/restore', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision:skillRevision})});
-    if (!res.ok) throw new Error(await res.text()); await refreshSkills();
-    document.getElementById('skillstatus').textContent = 'Restored: ' + name;
-  } catch(e) {document.getElementById('skillstatus').textContent = e.message;}
-}
-async function togglePinSkill() {
-  const name = document.getElementById('skillselect').value; if (!name || !skillRevision) return;
-  try {
-    const res = await fetch('/skills/' + encodeURIComponent(name) + '/pin', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision:skillRevision,pinned:!skillPinned})});
-    if (!res.ok) throw new Error(await res.text());
-    const row = await res.json(); skillRevision = row.revision; skillPinned = !!row.pinned;
-    await refreshSkills(); document.getElementById('skillselect').value = name;
-    document.getElementById('skillstatus').textContent = (skillPinned ? 'Pinned: ' : 'Unpinned: ') + name;
-  } catch(e) {document.getElementById('skillstatus').textContent = e.message;}
-}
-async function deleteSkill() {
-  const name = document.getElementById('skillselect').value;
-  if (!name || !confirm('Delete saved skill ' + name + '?')) return;
-  try {
-    const res = await fetch('/skills/' + encodeURIComponent(name) + '/delete', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision:skillRevision})});
-    if (!res.ok) throw new Error(await res.text()); newSkill(); await refreshSkills();
-  } catch(e) {document.getElementById('skillstatus').textContent = e.message;}
-}
+# The UI lives in templates/index.html + static/app.js + static/app.css (see grokbot package).
 
-function scrollChat() { wrap.scrollTop = wrap.scrollHeight; }
-
-function add(cls, text) {
-  const d = document.createElement('div');
-  d.className = 'msg ' + cls;
-  d.textContent = text;
-  chat.appendChild(d);
-  scrollChat();
-  return d;
-}
-
-async function send() {
-  const text = inp.value.trim();
-  if (!text || sendBtn.disabled) return;
-  const isTask = document.getElementById('mode').value === 'task';
-  add('you', text); inp.value = ''; sendBtn.disabled = true;
-  chatRunning = !isTask; updateStopButton();
-  const status = document.getElementById('status');
-  status.textContent = isTask ? 'Task running' : 'Replying';
-  const bubble = add('grok', ''); let full = ''; let pending = ''; let rawBuf = ''; let sawRetry = false;
-  try {
-    const res = await fetch(isTask ? '/task' : '/chat', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text, ...(isTask ? {requirements: document.getElementById('requirements').value.trim()} : {}), ...(isTask && document.getElementById('checks').value.trim() ? {checks: JSON.parse(document.getElementById('checks').value)} : {})})
-    });
-    if (!res.ok) throw new Error(await res.text());
-    if (isTask) {
-      const task = await res.json();
-      taskStatuses.set(task.id, 'queued'); updateStopButton();
-      await watchTask(task.id, bubble);
-      sendBtn.disabled = false; inp.focus(); return;
-    }
-    const reader = res.body.getReader(); const dec = new TextDecoder();
-    for (;;) {
-      const {done, value} = await reader.read();
-      if (done) break;
-      const chunk = dec.decode(value, {stream: true});
-      if (isTask) {
-        pending += chunk;
-        let pos;
-        while ((pos = pending.indexOf('\n')) >= 0) {
-          const line = pending.slice(0, pos); pending = pending.slice(pos + 1);
-          if (!line.trim()) continue;
-          const event = JSON.parse(line);
-          status.textContent = 'Step ' + event.step + ': ' + event.type;
-          if (event.type === 'progress') continue;
-          full += '[' + event.type + '] ' + event.text + '\n\n';
-          bubble.textContent = full;
-        }
-      } else {
-        rawBuf += chunk;
-        for (;;) {  // retry notices arrive as \x1e...\x1f control segments
-          const s = rawBuf.indexOf('\x1e');
-          if (s < 0) { full += rawBuf; rawBuf = ''; break; }
-          full += rawBuf.slice(0, s);
-          const e = rawBuf.indexOf('\x1f', s);
-          if (e < 0) { rawBuf = rawBuf.slice(s); break; }
-          status.textContent = rawBuf.slice(s + 1, e); rawBuf = rawBuf.slice(e + 1); sawRetry = true;
-        }
-        if (full && sawRetry) { status.textContent = 'Replying'; sawRetry = false; }
-        bubble.textContent = full;
-      }
-      scrollChat();
-    }
-    if (rawBuf && rawBuf.indexOf('\x1e') < 0) full += rawBuf;
-    if (!full) bubble.textContent = '[Empty reply]';
-    if (!isTask) status.textContent = 'Ready';
-  } catch (e) { bubble.textContent += '\n[Error: ' + e.message + ']'; status.textContent = 'Blocked'; }
-  chatRunning = false; updateStopButton();
-  sendBtn.disabled = false; inp.focus();
-}
-
-async function stopTask() {
-  const status = document.getElementById('status');
-  try {
-    const res = await fetch('/stop', {method: 'POST'});
-    if (!res.ok) throw new Error(await res.text());
-    const result = await res.json();
-    status.textContent = result.requested === true ? 'Stop requested; waiting for current request' : 'No running task or chat to stop';
-  } catch (e) { status.textContent = 'Stop request failed: ' + e.message; }
-}
-
-let chatRunning = false;
-const taskStatuses = new Map();
-function updateStopButton() {
-  document.getElementById('stop').disabled = !chatRunning && !Array.from(taskStatuses.values()).some(status => ['queued','running'].includes(status));
-}
-const watching = new Set();
-const taskViews = new Map();
-function taskBubble(id, bubble) {
-  let view = taskViews.get(id);
-  if (!view || view.bubble.isConnected === false) {
-    view = {bubble: bubble || add('grok tasklog', 'Saved task\n'), after: 0};
-    taskViews.set(id, view);
-  }
-  return view;
-}
-function noteFile(view, e) {
-  if (e.type === 'file' && typeof e.text === 'string') (view.files = view.files || new Set()).add(e.text);
-}
-function showFileChips(view) {
-  if (!view.files || !view.files.size || view.chipsShown === view.files.size) return;
-  view.chipsShown = view.files.size;
-  const bubble = add('grok', 'Files ready to download:\n');
-  for (const name of view.files) {
-    const link = document.createElement('a'); link.textContent = name; link.className = 'chip';
-    link.href = '/files/' + name.split('/').map(encodeURIComponent).join('/');
-    bubble.appendChild(link);
-  }
-  scrollChat();
-}
-function collapseLog(bubble) {
-  if (!bubble.classList) return;
-  bubble.classList.add('done');
-  if (!bubble.collapseBound && bubble.addEventListener) {
-    bubble.collapseBound = true;
-    bubble.addEventListener('click', () => bubble.classList.toggle('open'));
-  }
-}
-async function showSelectedTask() {
-  const id = document.getElementById('taskselect').value;
-  if (id) await watchTask(id, taskBubble(id).bubble);
-}
-document.getElementById('taskselect').addEventListener('change', showSelectedTask);
-async function watchTask(id, bubble) {
-  if (watching.has(id)) return;
-  const view = taskBubble(id, bubble); bubble = view.bubble;
-  watching.add(id);
-  let after = view.after; let retryText = '';
-  try {
-    for (;;) {
-      const er = await fetch('/tasks/' + id + '/events?after=' + after);
-      if (!er.ok) throw new Error('Could not load task events');
-      const events = await er.json();
-      for (const e of events) { if (e.seq <= after) continue; after = view.after = e.seq; noteFile(view, e); if (e.type === 'retry') retryText = e.text; else if (e.type !== 'progress') retryText = ''; if (e.type !== 'progress') bubble.textContent += '[' + e.type + '] ' + e.text + '\n'; }
-      const sr = await fetch('/tasks/' + id); if (!sr.ok) throw new Error('Could not load task status');
-      const row = await sr.json();
-      document.getElementById('status').textContent = (row.status === 'running' && retryText) ? retryText : row.status + ' · step ' + row.steps + (row.attempts === undefined ? '' : ' · provider attempts ' + row.attempts + '/' + row.budgets.steps);
-      taskStatuses.set(id, row.status); updateStopButton();
-      if (!['queued','running'].includes(row.status)) {
-        // Status may have committed after the preceding events request.
-        // Drain only after observing terminal state, using the same cursor.
-        for (;;) {
-          const finalRes = await fetch('/tasks/' + id + '/events?after=' + after);
-          if (!finalRes.ok) throw new Error('Could not load final task events');
-          const finalEvents = await finalRes.json();
-          for (const e of finalEvents) {
-            if (e.seq <= after) continue;
-            after = view.after = e.seq; noteFile(view, e);
-            if (e.type !== 'progress') bubble.textContent += '[' + e.type + '] ' + e.text + '\n';
-          }
-          if (finalEvents.length < 200) break;
-        }
-        collapseLog(bubble); showFileChips(view);
-        if (['blocked','interrupted','stopped'].includes(row.status)) addResumeButton(id, bubble);
-        break;
-      }
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-  } finally { watching.delete(id); await restoreTasks(false); }
-}
-async function restoreTasks(watch = true) {
-  try {
-    const res = await fetch('/tasks'); if (!res.ok) return;
-    const rows = await res.json(); const select = document.getElementById('taskselect');
-    taskStatuses.clear();
-    for (const row of rows) taskStatuses.set(row.id, row.status);
-    updateStopButton();
-    const selected = select.value; select.replaceChildren();
-    for (const row of rows) {
-      const option = document.createElement('option'); option.value = row.id;
-      option.textContent = row.status + ': ' + row.goal.slice(0, 60); select.appendChild(option);
-    }
-    if (rows.some(row => row.id === selected)) select.value = selected;
-    if (watch) {
-      for (const row of rows.filter(row => ['queued','running'].includes(row.status))) {
-        watchTask(row.id, taskBubble(row.id).bubble).catch(e => add('grok', e.message));
-      }
-      await showSelectedTask();
-    }
-  } catch (e) { document.getElementById('status').textContent = e.message; }
-}
-function addResumeButton(id, bubble) {
-  const btn = document.createElement('button'); btn.className = 'resume-btn'; btn.textContent = 'Resume task';
-  btn.addEventListener('click', async ev => { ev.stopPropagation(); btn.disabled = true; btn.textContent = 'Resuming...'; const ok = await resumeTask(id); if (!ok) { btn.disabled = false; btn.textContent = 'Resume task'; } });
-  bubble.appendChild(btn);
-}
-async function resumeTask(oneClickId) {
-  const id = oneClickId || document.getElementById('taskselect').value; if (!id) return false;
-  const answer = oneClickId ? '' : inp.value.trim();
-  try {
-    const checksText = oneClickId ? '' : document.getElementById('checks').value.trim();
-    const res = await fetch('/tasks/' + id + '/resume', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({answer, ...(checksText ? {checks: JSON.parse(checksText)} : {})})});
-    if (!res.ok) { let m = await res.text(); try { m = JSON.parse(m).error || m; } catch (_) {} document.getElementById('status').textContent = 'Could not resume: ' + m; return false; }
-    taskStatuses.set(id, 'queued'); updateStopButton();
-    if (!oneClickId) inp.value = '';
-    document.getElementById('status').textContent = 'Resuming...';
-    const view = taskBubble(id); if (view.bubble.classList) view.bubble.classList.remove('done','open'); watchTask(id, view.bubble).catch(e => add('grok', e.message));
-    return true;
-  } catch (e) { document.getElementById('status').textContent = 'Resume failed: ' + e.message; return false; }
-}
-restoreTasks();
-
-async function uploadFile(input) {
-  const file = input.files[0]; if (!file) return;
-  const status = document.getElementById('status');
-  if (file.size > 1048576) { status.textContent = 'File too large (1 MB maximum)'; input.value = ''; return; }
-  status.textContent = 'Reading upload…';
-  const form = new FormData(); form.append('file', file);
-  try {
-    const res = await fetch('/upload', {method: 'POST', body: form});
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Upload failed');
-    add('grok', 'Uploaded ' + data.path + ' (' + data.characters + ' characters). This file can be read in Chat or Task mode.');
-    status.textContent = 'Upload ready';
-  } catch (e) { status.textContent = e.message; }
-  input.value = '';
-}
-
-async function restoreHistory() {
-  try {
-    const res = await fetch('/history'); if (!res.ok) return;
-    const rows = await res.json();
-    for (const row of rows) add(row.role === 'user' ? 'you' : 'grok', row.content);
-  } catch (_) { document.getElementById('status').textContent = 'Could not restore history'; }
-}
-restoreHistory();
-
-async function showFiles() {
-  const res = await fetch('/files');
-  if (!res.ok) { document.getElementById('status').textContent = 'Could not list files'; return; }
-  const names = await res.json(); const bubble = add('grok', names.length ? 'Workspace files:\n' : 'No workspace files yet.');
-  for (const name of names) {
-    const link = document.createElement('a'); link.textContent = name; link.className = 'chip';
-    link.href = '/files/' + name.split('/').map(encodeURIComponent).join('/');
-    bubble.appendChild(link);
-  }
-  scrollChat();
-}
-
-let providerList = [];
-let currentProviderId = '';
-async function loadProviders() {
-  try {
-    const res = await fetch('/providers'); if (!res.ok) return;
-    providerList = await res.json();
-    const sel = document.getElementById('providersel');
-    const current = sel.value; sel.replaceChildren();
-    for (const p of providerList) {
-      const op = document.createElement('option'); op.value = p.id; op.textContent = p.label; sel.appendChild(op);
-    }
-    const custom = document.createElement('option'); custom.value = 'custom'; custom.textContent = 'Custom URL (advanced)'; sel.appendChild(custom);
-    const wanted = current || currentProviderId;
-    if (providerList.some(p => p.id === wanted) || wanted === 'custom') sel.value = wanted;
-    providerChanged();
-  } catch (_) { /* leave the picker empty; Save still accepts a typed key */ }
-}
-function providerChanged() {
-  const sel = document.getElementById('providersel');
-  const custom = sel.value === 'custom';
-  document.getElementById('urlin').style.display = custom ? '' : 'none';
-  const p = providerList.find(x => x.id === sel.value);
-  const mi = document.getElementById('modelin');
-  mi.placeholder = p && p.model_hint ? 'Model (blank = ' + p.model_hint + ')' : 'Model (optional, blank = auto)';
-  document.getElementById('modelsurl').style.display = custom ? '' : 'none';
-  discoveryChanged();
-}
-let discoveryVersion = 0;
-let discoveryTimer;
-function clearModelChoices() {
-  const sel = document.getElementById('modelsel');
-  sel.replaceChildren();
-  const op = document.createElement('option'); op.value = ''; op.textContent = 'Choose a listed model (optional)'; sel.appendChild(op);
-  sel.value = '';
-}
-function discoveryChanged() {
-  discoveryVersion++;
-  clearModelChoices();
-  document.getElementById('modelstatus').textContent = 'Model list changed. Manual entry always works.';
-  if (typeof clearTimeout === 'function') clearTimeout(discoveryTimer);
-  discoveryTimer = setTimeout(() => refreshModels(false), 600);
-}
-function selectDiscoveredModel() {
-  const sel = document.getElementById('modelsel');
-  if (sel.value) document.getElementById('modelin').value = sel.value;
-}
-async function refreshModels(force = true) {
-  const version = ++discoveryVersion;
-  const sel = document.getElementById('providersel');
-  const custom = sel.value === 'custom';
-  const st = document.getElementById('modelstatus');
-  const btn = document.getElementById('refreshmodels');
-  clearModelChoices();
-  btn.disabled = true; st.textContent = 'Loading model list...';
-  try {
-    const res = await fetch('/models', {method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({provider: custom ? '' : sel.value, key: document.getElementById('keyin').value,
-        url: custom ? document.getElementById('urlin').value : '',
-        models_url: custom ? document.getElementById('modelsurl').value : '', refresh: force})});
-    const r = await res.json();
-    if (version !== discoveryVersion) return;
-    st.textContent = r.message || 'Model listing unavailable. Enter a model manually.';
-    if (!res.ok) return;
-    for (const id of r.models || []) {
-      const op = document.createElement('option'); op.value = id; op.textContent = id;
-      document.getElementById('modelsel').appendChild(op);
-    }
-    // Deliberately leave the placeholder selected; only an explicit choice edits modelin.
-    document.getElementById('modelsel').value = '';
-  } catch (_) {
-    if (version === discoveryVersion) st.textContent = 'Could not load models. Enter a model manually.';
-  } finally {
-    if (version === discoveryVersion) btn.disabled = false;
-  }
-}
-async function toggleSettings() {
-  const open = document.getElementById('settings').classList.toggle('open');
-  if (open) { await refreshKeyStatus(); loadProviders(); }
-  const side = document.getElementById('sidebar');
-  if (side.classList && side.classList.contains('open')) side.classList.remove('open');
-}
-
-function setKeyStatus(text, cls, busy) {
-  const el = document.getElementById('keystatus');
-  el.textContent = text; el.className = (cls || '') + (busy ? ' dots' : '');
-}
-async function refreshKeyStatus() {
-  const box = document.getElementById('keymask');
-  try {
-    const res = await fetch('/key_status'); if (!res.ok) return;
-    const s = await res.json();
-    currentProviderId = s.provider_id || '';
-    if (!document.getElementById('modelin').value && s.model) document.getElementById('modelin').value = s.model;
-    box.textContent = '';
-    if (!s.configured) { box.textContent = 'No key saved yet.'; return; }
-    const b = document.createElement('b'); b.textContent = s.masked;
-    box.append('Key in use: ', b, ' (' + s.source + ') \u00b7 ' + s.model + (s.provider ? ' \u00b7 ' + s.provider : ''));
-  } catch (_) { /* leave previous text */ }
-}
-async function testKey() {
-  const btn = document.getElementById('testbtn');
-  btn.disabled = true; btn.textContent = 'Testing'; btn.classList.add('dots');
-  setKeyStatus('Sending one tiny request', '', true);
-  try {
-    const res = await fetch('/test_key', {method: 'POST'});
-    const r = await res.json();
-    setKeyStatus((r.ok ? 'OK: ' : (r.status ? 'Failed (' + r.status + '): ' : 'Failed: ')) + r.message, r.ok ? 'ok' : 'bad');
-  } catch (e) { setKeyStatus('Could not run the test: ' + e.message, 'bad'); }
-  btn.disabled = false; btn.textContent = 'Test'; btn.classList.remove('dots');
-}
-
-function toggleSidebar() {
-  const side = document.getElementById('sidebar');
-  if (side.classList) side.classList.toggle('open');
-}
-
-async function saveKey() {
-  const sel = document.getElementById('providersel');
-  const custom = sel && sel.value === 'custom';
-  const saveRes = await fetch('/set_key', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({key: keyin.value, url: custom ? urlin.value : '', model: modelin.value,
-                          provider: custom ? '' : (sel ? sel.value : '')})
-  });
-  const st = await saveRes.text();
-  setKeyStatus(st, saveRes.ok ? 'ok' : 'bad');
-  if (saveRes.ok) { keyin.value = ''; await refreshKeyStatus(); discoveryChanged(); }
-}
-
-async function clearChat() {
-  const res = await fetch('/clear', {method: 'POST'});
-  if (!res.ok) { document.getElementById('status').textContent = await res.text(); return; }
-  chat.innerHTML = '<div class="hint">New chat. Memory cleared.</div>';
-  taskViews.clear();
-  const side = document.getElementById('sidebar');
-  if (side.classList && side.classList.contains('open')) side.classList.remove('open');
-}
-
-document.getElementById('mode').addEventListener('change', () => {
-  document.getElementById('composer').classList.toggle('taskmode', document.getElementById('mode').value === 'task');
-});
-
-inp.addEventListener('input', () => { inp.style.height = 'auto'; inp.style.height = Math.min(inp.scrollHeight, 140) + 'px'; });
-inp.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
-});
-</script>
-</body>
-</html>
-"""
-
-app = Flask(__name__)
+app = Flask(__name__, template_folder=str(Path(__file__).resolve().parent / 'templates'),
+            static_folder=str(Path(__file__).resolve().parent / 'static'))
 app.secret_key = os.environ.get('GROK_SESSION_SECRET') or secrets.token_hex(32)
 app.config.update(MAX_CONTENT_LENGTH=MAX_UPLOAD + 65536, SESSION_COOKIE_HTTPONLY=True,
-                  SESSION_COOKIE_SAMESITE='Strict',
+                  # Strict by default. 'None' (+GROK_SECURE_COOKIE=1) only when deliberately embedding the UI in an iframe.
+                  SESSION_COOKIE_SAMESITE=os.environ.get('GROK_COOKIE_SAMESITE', 'Strict'),
                   SESSION_COOKIE_SECURE=os.environ.get('GROK_SECURE_COOKIE') == '1',
                   API_KEY=os.environ.get('GROK_API_KEY', ''), MODEL=DEFAULT_MODEL, MOCK=False)
 PASSWORD = os.environ.get('GROK_APP_PASSWORD', '')
+# Who may embed the UI in a frame: 'none' (default, anti-clickjacking) or an origin list / '*' for a trusted preview host.
+FRAME_ANCESTORS = os.environ.get('GROK_FRAME_ANCESTORS', "'none'")
 # Any tunnel/reverse proxy must explicitly use exposed mode, even on loopback.
 DEPLOYMENT_MODE = os.environ.get('GROK_DEPLOYMENT_MODE', 'local')
 WORKSPACES = Path(os.environ.get('GROK_WORKSPACE_DIR', 'workspaces')).resolve()
@@ -767,7 +145,8 @@ def protect():
 def headers(response):
     response.headers['Cache-Control'] = 'no-store'
     response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'"
+    response.headers['Content-Security-Policy'] = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+                                                   "connect-src 'self'; frame-ancestors " + FRAME_ANCESTORS)
     return response
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -871,7 +250,14 @@ def iter_bounded_sse_lines(response):
 
 @app.route('/')
 def index():
-    return render_template_string(PAGE)
+    return render_template('index.html', version=grokbot.__version__, initial_cid='')
+
+
+@app.route('/c/<cid>')
+def index_conversation(cid):
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', cid):
+        return redirect('/')
+    return render_template('index.html', version=grokbot.__version__, initial_cid=cid)
 
 @app.route('/chat', methods=['POST'])
 def chat():
@@ -1327,8 +713,11 @@ def key_state():
     with provider_lock:
         saved = bool(settings.get('key_override'))
     pid = next((pid for pid, p in PROVIDERS.items() if p['url'] == url), '')
+    with provider_lock:
+        ctx_len = settings.get('context_length')
     return {'configured': bool(key), 'masked': mask_key(key), 'source': ('saved' if saved else 'environment') if key else 'none',
-            'model': model, 'provider': provider_label(url), 'provider_id': pid}
+            'model': model, 'provider': provider_label(url), 'provider_id': pid,
+            'context_length': int(ctx_len) if ctx_len else gconfig.DEFAULT_CONTEXT_TOKENS}
 
 
 @app.route('/key_status')
@@ -1427,12 +816,17 @@ def set_key():
     if not all(isinstance(v, str) for v in (key, url, model, provider)):
         return Response('Invalid settings.', status=400)
     key, url, model, provider = key.strip(), url.strip(), model.strip(), provider.strip()
+    ctx_len = data.get('context_length')
+    if ctx_len is not None and (isinstance(ctx_len, bool) or not isinstance(ctx_len, int) or not 1000 <= ctx_len <= 10_000_000):
+        return Response('context_length must be an integer number of tokens (1000–10000000).', status=400)
     if provider:
         if provider not in PROVIDERS:
             return Response('Unknown provider. Pick one from the list.', status=400)
         if url:
             return Response('Pick a provider from the list or a custom URL, not both.', status=400)
         url = PROVIDERS[provider]['url']
+        if provider == 'local' and not key:
+            key = 'local'   # local OpenAI-compatible servers accept any bearer token
     if not url and key:
         for prefix, pid in KEY_PREFIXES:
             if key.startswith(prefix):
@@ -1451,9 +845,14 @@ def set_key():
             return Response('Changing provider requires a new key in the same save.', status=400)
         if key: settings['key_override'] = key
         if url: settings['url_override'] = url
-        if model: settings['model_override'] = model
+        if model:
+            if model != settings.get('model_override'):
+                settings.pop('context_length', None)   # a new model means the old window no longer applies
+            settings['model_override'] = model
         elif provider and PROVIDERS[provider]['model_hint'] and (url != current_url or not settings.get('model_override')):
             settings['model_override'] = PROVIDERS[provider]['model_hint']
+            settings.pop('context_length', None)
+        if ctx_len is not None: settings['context_length'] = ctx_len
         if custom: custom_endpoints.add(url)
     model_discovery.clear_cache()
     label = provider_label(settings.get('url_override') or API_URL)
@@ -1461,21 +860,781 @@ def set_key():
     return Response('Saved in memory only. %s selected.' % label, content_type='text/plain')
 
 
+# ---------------------------------------------------------------------------
+# Unified tool-using agent (grokbot package): NDJSON stream, conversations, approvals, policy.
+# The legacy /chat (plain text stream) and /task (durable JSON-protocol harness) stay as they were.
+# ---------------------------------------------------------------------------
+REGISTRY = default_registry()
+POLICIES = PolicyStore(WORKSPACES)
+APPROVALS = ApprovalBroker(POLICIES)
+CONVERSATIONS = None
+conversations_lock = threading.Lock()
+agent_stream_fn = provider_client.stream_chat   # tests may monkeypatch this
+AGENT_EVENT_LOG = 400                           # events kept in memory per running turn for reconnects
+
+
+def conversation_store():
+    global CONVERSATIONS
+    with conversations_lock:
+        if CONVERSATIONS is None:
+            CONVERSATIONS = ConversationStore(Path(os.environ.get('GROK_CONVERSATION_DB', str(WORKSPACES / '.conversations.sqlite3'))))
+        return CONVERSATIONS
+
+
+def json_response(obj, status=200):
+    return Response(json.dumps(obj, ensure_ascii=False), status=status, content_type='application/json; charset=utf-8')
+
+
+mock_stream = provider_client.mock_stream
+
+
+def upload_note(c):
+    if not c['uploads']:
+        return ''
+    return ('Uploaded documents available in the workspace (untrusted data, read with read_file): '
+            + ', '.join(sorted(c['uploads'])) + '.')
+
+
+def current_context_tokens():
+    with provider_lock:
+        value = settings.get('context_length')
+    return int(value) if value else gconfig.DEFAULT_CONTEXT_TOKENS
+
+
+def make_summarizer(cfg):
+    def summarizer(prompt_messages):
+        return provider_client.complete_once(cfg, prompt_messages, max_tokens=1200)
+    return summarizer
+
+
+def resolve_conversation(store, sid, requested):
+    conv = store.get(requested, sid) if isinstance(requested, str) and requested else None
+    if conv is None and session.get('cid'):
+        conv = store.get(session['cid'], sid)
+    if conv is None:
+        conv = store.get(store.create(sid), sid)
+    session['cid'] = conv['id']
+    return conv
+
+
+MEMORY = None
+SCHEDULER = None
+MCP = None
+TELEGRAM = None
+NOTIFICATIONS = collections.defaultdict(list)     # owner -> [{...}] delivered to the web UI by /notifications
+PERSISTED_EVENTS = ('tool_start', 'tool_end', 'approval', 'compaction', 'error', 'status', 'subagent_start', 'subagent_end',
+                    'memory_saved', 'schedule_created')
+UNATTENDED_NOTE = ('This is an unattended scheduled run: nobody can answer questions or approve actions, and anything that needs '
+                   'approval is denied automatically. Do the task with the tools that are allowed and finish with a concise report.')
+
+
+def _close_stores():
+    for store in (MEMORY, SCHEDULER, CONVERSATIONS):
+        try:
+            if store is not None:
+                store.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+atexit.register(_close_stores)
+
+
+def memory_store():
+    global MEMORY
+    with conversations_lock:
+        if MEMORY is None:
+            MEMORY = MemoryStore(Path(os.environ.get('GROK_MEMORY_DB', str(WORKSPACES / '.memory.sqlite3'))))
+        return MEMORY
+
+
+def scheduler():
+    global SCHEDULER
+    with conversations_lock:
+        if SCHEDULER is None:
+            SCHEDULER = Scheduler(Path(os.environ.get('GROK_SCHEDULE_DB', str(WORKSPACES / '.schedules.sqlite3'))), runner=run_scheduled_job)
+        return SCHEDULER
+
+
+def mcp_manager(reload=False):
+    """MCP servers from GROK_MCP_CONFIG / ./mcp.json, registered into the shared tool registry (lazy, on first use)."""
+    global MCP
+    with conversations_lock:
+        if MCP is None or reload:
+            if MCP is not None:
+                MCP.close()
+            MCP = MCPManager().load()
+            if MCP.servers:
+                threading.Thread(target=MCP.register_tools, args=(REGISTRY,), daemon=True, name='mcp-connect').start()
+        return MCP
+
+
+def owner_dirname(owner):
+    return re.sub(r'[^A-Za-z0-9_-]+', '-', owner)[:80] or 'anon'
+
+
+def owner_workspace(owner):
+    """Workspace for any owner: web sessions use workspaces/<sid>, Telegram chats workspaces/tg-<chat>."""
+    with clients_lock:
+        c = clients.get(owner)
+    if c is not None:
+        return c['workspace']
+    return Workspace(WORKSPACES / owner_dirname(owner))
+
+
+def user_content(text, images=None):
+    """OpenAI-style message content: plain text, or text + image_url parts when images are attached."""
+    if not images:
+        return text
+    parts = [{'type': 'text', 'text': text}]
+    parts += [{'type': 'image_url', 'image_url': {'url': img['data_url'], 'detail': 'auto'}} for img in images]
+    return parts
+
+
+def validate_images(images):
+    if images is None:
+        return []
+    if not isinstance(images, list) or len(images) > 4:
+        raise ValueError('Attach at most 4 images.')
+    out = []
+    for img in images:
+        if not isinstance(img, dict) or not isinstance(img.get('data_url'), str):
+            raise ValueError('Each image needs a data_url.')
+        url = img['data_url']
+        if not re.match(r'^data:image/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$', url) or len(url) > 2_800_000:
+            raise ValueError('Images must be PNG/JPEG/WebP/GIF data URLs up to ~2 MB.')
+        out.append({'name': secure_filename(str(img.get('name') or 'image'))[:80] or 'image', 'data_url': url})
+    return out
+
+
+def run_owner_turn(owner, workspace, cid, text, *, emit, stop, images=None, uploads=None, json_mode=False,
+                   unattended=False, policy=None, cfg=None, extras=None, system_extra=''):
+    """One agent turn on an existing conversation, persisted. Shared by /agent, the scheduler and Telegram.
+    Returns (TurnResult, ToolContext). ``emit`` receives every event; the persisted entry keeps the notable ones."""
+    store = conversation_store()
+    note = text + ''.join('\n[image: %s]' % img['name'] for img in (images or []))
+    store.append_entry(cid, owner, 'user', note)
+    prior, summary = store.get_context(cid, owner)
+    cfg = cfg or config_snapshot()
+    mock = bool(app.config['MOCK'] and not cfg[0])
+    policy = policy or POLICIES.load(owner)
+    if unattended:
+        policy = dataclasses.replace(policy, approval='never')
+    mcp_manager()
+    ctx_extras = {'json_mode': json_mode, 'owner': owner, 'memory': memory_store(), 'conversations': store,
+                  'scheduler': scheduler(), 'uploads': list(uploads or []), 'unattended': unattended}
+    ctx_extras.update(extras or {})
+    ctx = ToolContext(workspace=workspace, session_id=owner, policy=policy, approvals=APPROVALS, stop=stop, extras=ctx_extras)
+    kept = []
+
+    def record(event):
+        if event.get('type') in PERSISTED_EVENTS:
+            kept.append(event)
+        emit(event)
+    extra_prompt = '\n\n'.join(x for x in (system_extra, UNATTENDED_NOTE if unattended else '') if x)
+    messages = list(prior) + [{'role': 'user', 'content': user_content(text, images)}]
+    result = agent_core.run_turn(
+        messages, REGISTRY, ctx, cfg, record,
+        max_steps=gconfig.SCHEDULED_MAX_STEPS if unattended else None,
+        context_tokens=current_context_tokens(), model_label=cfg[2] + (' via ' + provider_label(cfg[1]) if cfg[1] else ''),
+        system_extra=extra_prompt, summarizer=None if mock else make_summarizer(cfg), previous_summary=summary,
+        stream_fn=mock_stream if mock else agent_stream_fn)
+    store.append_entry(cid, owner, 'assistant', result.text or '', events=kept)
+    store.set_context(cid, owner, result.messages, result.summary)
+    return result, ctx
+
+
+def notify(owner, payload):
+    box = NOTIFICATIONS[owner]
+    box.append(dict(payload, time=time.time()))
+    del box[:-50]
+
+
+def run_scheduled_job(job):
+    """Scheduler callback: run the job's prompt as an unattended turn in a fresh conversation and deliver the result."""
+    owner = job['owner']
+    store = conversation_store()
+    cid = store.create(owner, '⏰ ' + job['title'])
+    workspace = owner_workspace(owner)
+    result, _ = run_owner_turn(owner, workspace, cid, job['prompt'], emit=lambda e: None, stop=threading.Event(),
+                               unattended=True, extras={'delivery': job.get('delivery') or {}})
+    summary = (result.text or '').strip()
+    notify(owner, {'type': 'schedule', 'job_id': job['id'], 'title': job['title'], 'conversation_id': cid,
+                   'status': result.status, 'preview': summary[:200]})
+    chat_id = (job.get('delivery') or {}).get('telegram_chat')
+    if chat_id and TELEGRAM is not None:
+        try:
+            TELEGRAM.send(chat_id, '⏰ %s\n\n%s' % (job['title'], summary or '(no output)'))
+        except Exception:  # noqa: BLE001
+            pass
+    return result.status, summary[:300]
+
+
+class TelegramRunner:
+    """Adapter between the Telegram gateway and run_owner_turn (one current conversation per chat)."""
+
+    def __init__(self):
+        self.current = {}
+
+    def conversation_for(self, owner):
+        store = conversation_store()
+        cid = self.current.get(owner)
+        if cid and store.get(cid, owner):
+            return cid
+        rows = store.list(owner, limit=1)
+        cid = rows[0]['id'] if rows else store.create(owner, 'Telegram')
+        self.current[owner] = cid
+        return cid
+
+    def new_conversation(self, owner):
+        self.current[owner] = conversation_store().create(owner, 'Telegram')
+        return self.current[owner]
+
+    def __call__(self, owner, text, emit, stop):
+        chat_id = owner.split(':', 1)[1] if ':' in owner else owner
+        cid = self.conversation_for(owner)
+        result, _ = run_owner_turn(owner, owner_workspace(owner), cid, text, emit=emit, stop=stop,
+                                   extras={'delivery': {'telegram_chat': chat_id}})
+        return result
+
+
+def start_telegram():
+    """Start the Telegram gateway when GROK_TELEGRAM_TOKEN is set (allowlist required; fails closed)."""
+    global TELEGRAM
+    if not gconfig.TELEGRAM_TOKEN:
+        return None
+    from grokbot.gateway.telegram import TelegramGateway
+    TELEGRAM = TelegramGateway(gconfig.TELEGRAM_TOKEN, gconfig.TELEGRAM_ALLOWED_IDS, TelegramRunner(), approvals=APPROVALS, policy_store=POLICIES)
+    TELEGRAM.start()
+    return TELEGRAM
+
+
+class AgentRun:
+    """One running /agent turn: worker thread + event log so a reloaded page can reattach."""
+
+    def __init__(self, turn, cid):
+        self.turn = turn
+        self.cid = cid
+        self.events = []
+        self.done = threading.Event()
+        self.lock = threading.Lock()
+
+    def record(self, event):
+        with self.lock:
+            if len(self.events) < AGENT_EVENT_LOG:
+                self.events.append(event)
+            elif event['type'] in ('approval_required', 'approval', 'done', 'error'):
+                self.events.append(event)
+
+
+@app.route('/agent', methods=['POST'])
+def agent_route():
+    if request.content_length and request.content_length > 12_000_000:
+        return Response('JSON request too large.', status=413)
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return Response('Send a JSON object.', status=400)
+    text = data.get('message')
+    if not isinstance(text, str) or not text.strip() or len(text) > 12000:
+        return Response('Send a message of 1–12000 characters.', status=400)
+    try:
+        images = validate_images(data.get('images'))
+    except ValueError as exc:
+        return Response(str(exc), status=400)
+    c = client()
+    sid = session['sid']
+    if not c['busy'].acquire(False):
+        return Response('This session is already running.', status=409)
+    if task_manager().busy(sid):
+        c['busy'].release()
+        return Response('This session is already running.', status=409)
+    c['stop'].clear()
+    store = conversation_store()
+    try:
+        conv = resolve_conversation(store, sid, data.get('conversation_id'))
+    except Exception:
+        c['busy'].release()
+        raise
+    run = AgentRun(None, conv['id'])
+    c['agent_run'] = run
+    title = conv['title']
+    json_mode = bool(c.get('json_mode', False))
+
+    def work():
+        try:
+            result, ctx = run_owner_turn(sid, c['workspace'], conv['id'], text, emit=run.record, stop=c['stop'], images=images,
+                                         uploads=list(c['uploads']), json_mode=json_mode, system_extra=upload_note(c))
+            if ctx.extras.get('json_mode'):
+                c['json_mode'] = True
+            # Mirror the exchange into the legacy history so /task and /chat keep shared context.
+            c['history'] = (c['history'] + [{'role': 'user', 'content': text}, {'role': 'assistant', 'content': result.text or ''}])[-24:]
+            try:
+                task_manager().store_history(sid, c['history'])
+            except Exception:
+                pass
+        except BaseException as exc:  # noqa: BLE001 - surfaced to the browser
+            run.record({'type': 'error', 'text': 'Internal error: ' + type(exc).__name__ + ': ' + str(exc)[:300]})
+            run.record({'type': 'done', 'status': 'error', 'steps': 0, 'tool_calls': 0, 'usage': {}})
+        finally:
+            run.done.set()
+            c['busy'].release()
+    threading.Thread(target=work, daemon=True, name='agent-' + sid[:8]).start()
+
+    def generate():
+        yield json.dumps({'type': 'conversation', 'id': conv['id'], 'title': title}) + '\n'
+        sent = 0
+        last_beat = time.monotonic()
+        while True:
+            with run.lock:
+                batch = run.events[sent:]
+            for event in batch:
+                yield json.dumps(event, ensure_ascii=False) + '\n'
+            sent += len(batch)
+            if run.done.is_set() and sent >= len(run.events):
+                break
+            if time.monotonic() - last_beat > 15:
+                last_beat = time.monotonic()
+                yield json.dumps({'type': 'heartbeat'}) + '\n'
+            run.done.wait(0.1)
+    return Response(generate(), content_type='application/x-ndjson; charset=utf-8',
+                    headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/agent/current')
+def agent_current():
+    c = client()
+    run = c.get('agent_run')
+    if run is None:
+        return json_response({'running': False})
+    pending = {p['id'] for p in APPROVALS.list_pending(session['sid'])}
+    events = []
+    with run.lock:
+        for e in run.events:
+            if e['type'] == 'approval_required':
+                e = dict(e, resolved=e['id'] not in pending)
+            events.append(e)
+    return json_response({'running': not run.done.is_set(), 'conversation_id': run.cid, 'events': events})
+
+
+@app.route('/agent/approve', methods=['POST'])
+def agent_approve():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get('id'), str) or data.get('decision') not in ('allow', 'deny', 'always'):
+        return Response('Send {"id": ..., "decision": "allow"|"deny"|"always"}.', status=400)
+    if not APPROVALS.resolve(data['id'], data['decision'], session['sid']):
+        return Response('No such pending approval (it may have timed out).', status=404)
+    return json_response({'ok': True})
+
+
+@app.route('/agent/pending')
+def agent_pending():
+    return json_response(APPROVALS.list_pending(session['sid']))
+
+
+@app.route('/policy', methods=['GET', 'POST'])
+def policy_route():
+    sid = session['sid']
+    policy = POLICIES.load(sid)
+    if request.method == 'POST':
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return Response('Send a JSON object.', status=400)
+        mode = data.get('mode', policy.mode)
+        approval = data.get('approval', policy.approval)
+        network = data.get('network', policy.network)
+        allow = data.get('allow', policy.allow)
+        if mode not in SANDBOX_MODES or approval not in APPROVAL_MODES or not isinstance(network, bool):
+            return Response('mode must be one of %s; approval one of %s.' % (', '.join(SANDBOX_MODES), ', '.join(APPROVAL_MODES)), status=400)
+        if not isinstance(allow, list) or not all(isinstance(a, str) and 0 < len(a) <= 200 for a in allow) or len(allow) > 200:
+            return Response('allow must be a list of up to 200 short patterns.', status=400)
+        policy = SandboxPolicy(mode=mode, approval=approval, network=network, allow=allow, deny=policy.deny)
+        POLICIES.save(sid, policy)
+    body = policy.to_dict()
+    body.update({'sandbox': sandbox_mod.describe(), 'search_backend': search_backend(),
+                 'tools': REGISTRY.names(), 'tool_mode': gconfig.TOOL_MODE})
+    return json_response(body)
+
+
+@app.route('/conversations', methods=['GET', 'POST'])
+def conversations_route():
+    store = conversation_store(); sid = session['sid']
+    if request.method == 'POST':
+        c = client()
+        if c['busy'].locked():
+            return Response('Wait for the running reply to finish.', status=409)
+        cid = store.create(sid)
+        session['cid'] = cid
+        return json_response({'id': cid, 'title': 'New chat', 'entries': []})
+    return json_response(store.list(sid))
+
+
+@app.route('/conversations/current')
+def conversation_current():
+    store = conversation_store(); sid = session['sid']
+    conv = store.get(session.get('cid') or '', sid) or store.latest(sid)
+    if conv is None:
+        return json_response({'id': ''})
+    session['cid'] = conv['id']
+    run = client().get('agent_run')
+    return json_response({'id': conv['id'], 'title': conv['title'], 'entries': store.entries(conv['id'], sid),
+                          'running': bool(run and not run.done.is_set())})
+
+
+@app.route('/conversations/search')
+def conversation_search():
+    q = (request.args.get('q') or '').strip()
+    if not q or len(q) > 200:
+        return json_response([])
+    return json_response(conversation_store().search(session['sid'], q))
+
+
+@app.route('/conversations/<cid>', methods=['GET'])
+def conversation_get(cid):
+    store = conversation_store(); sid = session['sid']
+    conv = store.get(cid, sid)
+    if conv is None:
+        return Response('No such conversation.', status=404)
+    return json_response({**conv, 'entries': store.entries(cid, sid)})
+
+
+@app.route('/conversations/<cid>/select', methods=['POST'])
+def conversation_select(cid):
+    store = conversation_store(); sid = session['sid']
+    conv = store.get(cid, sid)
+    if conv is None:
+        return Response('No such conversation.', status=404)
+    if client()['busy'].locked():
+        return Response('Wait for the running reply to finish.', status=409)
+    session['cid'] = cid
+    return json_response({**conv, 'entries': store.entries(cid, sid)})
+
+
+@app.route('/conversations/<cid>/rename', methods=['POST'])
+def conversation_rename(cid):
+    data = request.get_json(silent=True)
+    title = data.get('title') if isinstance(data, dict) else None
+    if not isinstance(title, str) or not title.strip() or len(title) > 120:
+        return Response('Send a title of 1–120 characters.', status=400)
+    if not conversation_store().rename(cid, session['sid'], title.strip()):
+        return Response('No such conversation.', status=404)
+    return json_response({'ok': True})
+
+
+@app.route('/conversations/<cid>/pin', methods=['POST'])
+def conversation_pin(cid):
+    data = request.get_json(silent=True) or {}
+    pinned = data.get('pinned', True) if isinstance(data, dict) else True
+    if not conversation_store().pin(cid, session['sid'], bool(pinned)):
+        return Response('No such conversation.', status=404)
+    return json_response({'ok': True})
+
+
+@app.route('/conversations/<cid>/delete', methods=['POST'])
+def conversation_delete(cid):
+    if client()['busy'].locked():
+        return Response('Wait for the running reply to finish.', status=409)
+    if not conversation_store().delete(cid, session['sid']):
+        return Response('No such conversation.', status=404)
+    if session.get('cid') == cid:
+        session.pop('cid', None)
+    return json_response({'ok': True})
+
+
+@app.route('/compact', methods=['POST'])
+def compact_route():
+    c = client(); sid = session['sid']
+    data = request.get_json(silent=True) or {}
+    store = conversation_store()
+    conv = store.get(data.get('conversation_id') or session.get('cid') or '', sid) if isinstance(data, dict) else None
+    if conv is None:
+        return json_response({'error': 'No conversation selected.'}, 404)
+    if not c['busy'].acquire(False):
+        return json_response({'error': 'Wait for the running reply to finish.'}, 409)
+    try:
+        messages, summary = store.get_context(conv['id'], sid)
+        before = compaction.estimate_tokens(messages)
+        cfg = config_snapshot()
+        summarizer = None if (app.config['MOCK'] and not cfg[0]) else make_summarizer(cfg)
+        new_messages, new_summary, method = compaction.compact(messages, summarizer, keep_recent=2, previous_summary=summary)
+        store.set_context(conv['id'], sid, new_messages, new_summary)
+        return json_response({'method': method, 'before_tokens': before, 'after_tokens': compaction.estimate_tokens(new_messages)})
+    finally:
+        c['busy'].release()
+
+
+@app.route('/set_model', methods=['POST'])
+def set_model():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return Response('Send a JSON object.', status=400)
+    model = data.get('model', '')
+    ctx_len = data.get('context_length')
+    if not isinstance(model, str) or len(model) > 200 or (ctx_len is not None and (not isinstance(ctx_len, int) or not 1000 <= ctx_len <= 10_000_000)):
+        return Response('Send {"model": "name", "context_length": optional int}.', status=400)
+    with provider_lock:
+        if model.strip():
+            settings['model_override'] = model.strip()
+        if ctx_len is not None:
+            settings['context_length'] = ctx_len
+        elif model.strip():
+            settings.pop('context_length', None)
+    key, url, current = config_snapshot()
+    return Response('Model set to %s (%s).' % (current, provider_label(url)), content_type='text/plain')
+
+
+@app.route('/capabilities')
+def capabilities():
+    from grokbot import plugins as plugin_mod
+    sid = session['sid']
+    return json_response({'version': grokbot.__version__, 'tools': REGISTRY.describe(), 'sandbox': sandbox_mod.describe(),
+                         'search_backend': search_backend(), 'tool_mode': gconfig.TOOL_MODE,
+                         'limits': {'max_steps': gconfig.MAX_STEPS, 'context_tokens': current_context_tokens(),
+                                    'subagent_depth': gconfig.MAX_SUBAGENT_DEPTH},
+                         'memory': {'count': memory_store().count(sid)},
+                         'schedules': {'count': len(scheduler().list(sid)), 'running': SCHEDULER is not None and SCHEDULER._thread is not None},
+                         'mcp': mcp_manager().describe(), 'plugins': plugin_mod.loaded(),
+                         'telegram': TELEGRAM is not None, 'local_provider': 'local' in PROVIDERS})
+
+
+# ---------------------------------------------------------------------------
+# Memory, schedules, MCP, skills import/export, conversation export, notifications
+# ---------------------------------------------------------------------------
+@app.route('/memories', methods=['GET', 'POST'])
+def memories_route():
+    sid = session['sid']
+    store = memory_store()
+    if request.method == 'GET':
+        q = (request.args.get('q') or '').strip()
+        return json_response(store.search(sid, q, limit=100) if q else store.list(sid))
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get('text'), str):
+        return Response('Send {"text": ..., "tags": [...], "pinned": bool}.', status=400)
+    try:
+        row = store.save(sid, data['text'], data.get('tags'), source='user', pinned=bool(data.get('pinned', False)))
+    except ValueError as exc:
+        return Response(str(exc), status=400)
+    return json_response(row)
+
+
+@app.route('/memories/<mid>', methods=['POST'])
+def memory_update(mid):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return Response('Send a JSON object.', status=400)
+    try:
+        row = memory_store().update(session['sid'], mid, text=data.get('text'), tags=data.get('tags'),
+                                    pinned=data['pinned'] if isinstance(data.get('pinned'), bool) else None)
+    except ValueError as exc:
+        return Response(str(exc), status=400)
+    if row is None:
+        return Response('No such memory.', status=404)
+    return json_response(row)
+
+
+@app.route('/memories/<mid>/delete', methods=['POST'])
+def memory_delete(mid):
+    if not memory_store().delete(session['sid'], mid):
+        return Response('No such memory.', status=404)
+    return json_response({'ok': True})
+
+
+@app.route('/schedules', methods=['GET', 'POST'])
+def schedules_route():
+    sid = session['sid']
+    sched = scheduler()
+    if request.method == 'GET':
+        return json_response(sched.list(sid))
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get('when'), str) or not isinstance(data.get('prompt'), str):
+        return Response('Send {"when": "every day at 08:00", "prompt": "...", "title": "..."}.', status=400)
+    try:
+        job = sched.add(sid, data['when'], data['prompt'], str(data.get('title') or ''))
+    except ScheduleError as exc:
+        return Response(str(exc), status=400)
+    return json_response(job)
+
+
+@app.route('/schedules/<jid>/<action>', methods=['POST'])
+def schedule_action(jid, action):
+    sid = session['sid']
+    sched = scheduler()
+    job = sched.get(sid, jid)
+    if job is None:
+        return Response('No such scheduled task.', status=404)
+    if action == 'delete':
+        sched.delete(sid, jid)
+        return json_response({'ok': True})
+    if action == 'toggle':
+        return json_response(sched.set_enabled(sid, jid, not job['enabled']))
+    if action == 'run':
+        if jid in sched.running:
+            return Response('Already running.', status=409)
+        threading.Thread(target=sched.run_job, args=(job,), daemon=True, name='job-' + jid).start()
+        return json_response({'ok': True, 'started': True})
+    return Response('Unknown action.', status=404)
+
+
+@app.route('/notifications')
+def notifications_route():
+    sid = session['sid']
+    box = NOTIFICATIONS.get(sid) or []
+    NOTIFICATIONS[sid] = []
+    return json_response(box)
+
+
+@app.route('/mcp', methods=['GET'])
+def mcp_status():
+    manager = mcp_manager()
+    tools = [t for t in REGISTRY.describe() if t['name'].startswith('mcp__')]
+    return json_response({'config': str(manager.config_path or MCPManager.default_config_path() or ''), 'servers': manager.describe(), 'tools': tools})
+
+
+@app.route('/mcp/reload', methods=['POST'])
+def mcp_reload():
+    manager = mcp_manager(reload=True)
+    return json_response({'servers': manager.describe()})
+
+
+@app.route('/skills/export')
+def skills_export():
+    store = client()['workspace'].skills
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for row in store.list(include_archived=False):
+            try:
+                skill = store.read(row['name'])
+            except (ValueError, OSError):
+                continue
+            zf.writestr(row['name'] + '/SKILL.md', skill['content'] if isinstance(skill, dict) else str(skill))
+    buf.seek(0)
+    return send_file(buf, mimetype='application/zip', as_attachment=True, download_name='skills.zip')
+
+
+@app.route('/skills/import', methods=['POST'])
+def skills_import():
+    store = client()['workspace'].skills
+    upload = request.files.get('file')
+    if upload is None:
+        return json_response({'error': 'Upload a skills.zip (folders with SKILL.md).'}, 400)
+    raw = upload.read(2_000_001)
+    if len(raw) > 2_000_000:
+        return json_response({'error': 'Zip too large (2 MB max).'}, 413)
+    imported, errors = [], []
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(raw))
+    except zipfile.BadZipFile:
+        return json_response({'error': 'Not a zip file.'}, 400)
+    for info in zf.infolist()[:200]:
+        if not info.filename.endswith('SKILL.md') or info.file_size > 60000:
+            continue
+        parts = info.filename.replace('\\', '/').split('/')
+        if any(part in ('', '.', '..') for part in parts[:-1]) or info.filename.startswith('/'):
+            errors.append(info.filename + ': unsafe path')
+            continue
+        folder = parts[-2] if len(parts) >= 2 else ''
+        try:
+            text = zf.read(info).decode('utf-8')
+            name, description, body = parse_skill_markdown(text, folder)
+            existing = None
+            try:
+                existing = store.read(name)
+            except (ValueError, OSError):
+                pass
+            revision = existing.get('revision', '') if isinstance(existing, dict) else ''
+            store.save(name, description, body, revision, created_by='user')
+            imported.append(name)
+        except (ValueError, OSError, UnicodeError) as exc:
+            errors.append('%s: %s' % (info.filename, exc))
+    return json_response({'imported': imported, 'errors': errors})
+
+
+def parse_skill_markdown(text, fallback_name=''):
+    """SKILL.md with optional YAML/JSON front matter (name/description) -> (name, description, body)."""
+    name, description, body = fallback_name, '', text
+    m = re.match(r'^---\s*\n(.*?)\n---\s*\n?', text, re.S)
+    if m:
+        front, body = m.group(1), text[m.end():]
+        for line in front.splitlines():
+            if ':' not in line:
+                continue
+            key, value = line.split(':', 1)
+            key, value = key.strip().lower(), value.strip()
+            if value.startswith(('"', "'")) and value.endswith(value[0]) and len(value) >= 2:
+                value = value[1:-1]
+            if key == 'name':
+                name = value
+            elif key == 'description':
+                description = value
+    if not description:
+        first = next((ln.strip() for ln in body.splitlines() if ln.strip() and not ln.startswith('#')), '')
+        description = first[:200] or 'Imported skill'
+    if not name:
+        raise ValueError('skill has no name')
+    return name, description, body.strip() + '\n'
+
+
+@app.route('/conversations/<cid>/export')
+def conversation_export(cid):
+    sid = session['sid']
+    store = conversation_store()
+    conv = store.get(cid, sid)
+    if conv is None:
+        return Response('No such conversation.', status=404)
+    entries = store.entries(cid, sid)
+    fmt = request.args.get('format', 'md')
+    safe = secure_filename(conv['title'] or 'conversation')[:60] or 'conversation'
+    if fmt == 'json':
+        body = json.dumps({'id': cid, 'title': conv['title'], 'entries': entries}, ensure_ascii=False, indent=2)
+        return Response(body, content_type='application/json; charset=utf-8',
+                        headers={'Content-Disposition': 'attachment; filename="%s.json"' % safe})
+    lines = ['# ' + (conv['title'] or 'Conversation'), '']
+    for e in entries:
+        who = 'You' if e['role'] == 'user' else 'Assistant'
+        lines += ['## ' + who, '', e['content'] or '', '']
+        for ev in e.get('events') or []:
+            if ev.get('type') == 'tool_start':
+                lines.append('> tool `%s` %s' % (ev.get('name'), json.dumps(ev.get('arguments', {}), ensure_ascii=False)[:300]))
+        lines.append('')
+    return Response('\n'.join(lines), content_type='text/markdown; charset=utf-8',
+                    headers={'Content-Disposition': 'attachment; filename="%s.md"' % safe})
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--mock', action='store_true')
     parser.add_argument('--model', default=DEFAULT_MODEL)
     parser.add_argument('--port', type=int, default=5000)
+    parser.add_argument('--host', default='127.0.0.1',
+                        help='bind address; anything but loopback requires GROK_DEPLOYMENT_MODE=exposed + GROK_APP_PASSWORD (Docker: 0.0.0.0)')
     args = parser.parse_args()
     app.config.update(MOCK=args.mock, MODEL=args.model)
+    if args.host not in ('127.0.0.1', 'localhost', '::1') and not (os.environ.get('GROK_IN_CONTAINER') or PASSWORD):
+        print('Refusing to bind %s without GROK_APP_PASSWORD (or GROK_IN_CONTAINER=1 behind a container port mapping).' % args.host)
+        return
     if not PASSWORD: print('Local-only access. Set GROK_APP_PASSWORD before sharing a tunnel.')
     if SETTINGS_FILE.exists(): print('Legacy settings.json loaded. Remove it after moving your key to an environment variable; new settings are memory-only.')
+    print('grokbot %s · sandbox backend: %s · search: %s' % (grokbot.__version__, sandbox_mod.describe()['backend'], search_backend()))
     manager = task_manager()
     manager.prune()
     try:
-        app.run(host='127.0.0.1', port=args.port, debug=False, threaded=True)
+        conversation_store().prune()
+    except Exception:
+        pass
+    scheduler().start()
+    mcp_manager()
+    try:
+        if start_telegram() is not None:
+            print('Telegram gateway: polling (allowlist %d ids)' % len(gconfig.TELEGRAM_ALLOWED_IDS))
+    except (ValueError, ImportError) as exc:
+        print('Telegram gateway not started: %s' % exc)
+    try:
+        app.run(host=args.host, port=args.port, debug=False, threaded=True)
     finally:
         manager.close()
+        if SCHEDULER is not None:
+            SCHEDULER.stop()
+        if MCP is not None:
+            MCP.close()
 
 if __name__ == '__main__':
     main()

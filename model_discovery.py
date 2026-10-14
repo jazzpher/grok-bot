@@ -49,6 +49,30 @@ def same_catalog(base, candidate):
         return False
 
 
+CONTEXT_KEYS = ('context_length', 'max_context_length', 'context_window', 'max_input_tokens', 'inputTokenLimit',
+                'max_model_len', 'n_ctx')
+
+
+def context_length(row):
+    """Best-effort context window (tokens) from a provider model row; 0 when unknown.
+    Providers disagree on the key name (OpenRouter: context_length / top_provider.context_length,
+    Gemini: inputTokenLimit, vLLM: max_model_len)."""
+    if not isinstance(row, dict):
+        return 0
+    candidates = [row.get(k) for k in CONTEXT_KEYS]
+    top = row.get('top_provider')
+    if isinstance(top, dict):
+        candidates.append(top.get('context_length'))
+    for value in candidates:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)) and 1000 <= value <= 100_000_000:
+            return int(value)
+        if isinstance(value, str) and value.isdigit() and 1000 <= int(value) <= 100_000_000:
+            return int(value)
+    return 0
+
+
 def discover(key, endpoint, provider='', refresh=False):
     fingerprint = hmac.new(_salt, key.encode(), hashlib.sha256).digest()
     cache_key = (provider, endpoint, fingerprint)
@@ -57,6 +81,7 @@ def discover(key, endpoint, provider='', refresh=False):
         if not refresh and cached and time.monotonic() - cached[0] < CACHE_TTL:
             return dict(cached[1], cached=True)
     models, seen_ids, seen_pages = [], set(), set()
+    details = {}
     url, params, total = endpoint, {}, 0
     started = time.monotonic()
     if provider == 'openrouter':
@@ -108,6 +133,9 @@ def discover(key, endpoint, provider='', refresh=False):
                     raise DiscoveryError('Too many models to list safely. Enter a model manually.')
                 seen_ids.add(mid)
                 models.append(mid)
+                ctx_len = context_length(row)
+                if ctx_len:
+                    details[mid] = {'context_length': ctx_len}
         params = {}
         links = data.get('links')
         next_link = links.get('next') if isinstance(links, dict) else None
@@ -129,7 +157,7 @@ def discover(key, endpoint, provider='', refresh=False):
                 raise DiscoveryError('Unsupported model pagination. Enter a model manually.')
             url, params = endpoint, {'after': last}
         else:
-            result = {'models': sorted(models), 'cached': False,
+            result = {'models': sorted(models), 'details': details, 'cached': False,
                       'message': ('Choose a model or type one manually. Listed does not mean chat support or free quota.'
                                   if models else 'No models returned. Enter a model manually.')}
             if provider == 'nvidia':
