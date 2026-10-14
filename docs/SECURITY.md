@@ -9,6 +9,12 @@ new 0.9 surfaces (memory, automations, MCP, Telegram, plugins, images) add.
 - **Sandbox policy** (`read-only` / `workspace-write` / `full-access` × `on-request` / `never`). `run_command` is
   classified (read-only allowlist, destructive patterns, network, escape attempts) and asks, denies or runs
   accordingly. Persisted "always allow" rules are per owner and pattern-scoped.
+  **Without Docker** (subprocess backend, nothing confines a command) every `run_command` asks for approval in every
+  mode, saved "always allow" rules are not applied and "always" means "this once"; only the explicit
+  `full-access` + `never` policy skips the prompt. Unattended runs (scheduler) cannot prompt, so they deny shell commands.
+- **Hardline blocklist** (all backends, all policies including full-access + never): root/home deletion, disk
+  formatting or raw device writes, fork bombs, drive wipes (`format`, `del /s`, `rd /s`, `Remove-Item -Recurse` on a
+  drive root), `diskpart`/`bcdedit`, download-piped-to-shell. A small pattern list, not a complete safety net.
 - **Docker backend** (`GROK_SANDBOX_BACKEND=docker`): commands run in a throwaway container with the workspace
   bind-mounted, no network unless the policy says so, read-only root. The subprocess backend is *not* an isolation
   boundary — see LIMITATIONS.
