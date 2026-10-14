@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Local chat and bounded tasks. Public exposure requires GROK_APP_PASSWORD."""
 import argparse
+import atexit
 import collections
 import dataclasses
 import hmac
@@ -925,6 +926,18 @@ PERSISTED_EVENTS = ('tool_start', 'tool_end', 'approval', 'compaction', 'error',
                     'memory_saved', 'schedule_created')
 UNATTENDED_NOTE = ('This is an unattended scheduled run: nobody can answer questions or approve actions, and anything that needs '
                    'approval is denied automatically. Do the task with the tools that are allowed and finish with a concise report.')
+
+
+def _close_stores():
+    for store in (MEMORY, SCHEDULER, CONVERSATIONS):
+        try:
+            if store is not None:
+                store.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+atexit.register(_close_stores)
 
 
 def memory_store():

@@ -190,8 +190,15 @@ class StdioClient(_JsonRpc):
                     self.proc.wait(timeout=3)
                 except subprocess.TimeoutExpired:
                     self.proc.kill()
-        except OSError:
+                    self.proc.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
             pass
+        for stream in (self.proc.stdin, self.proc.stdout):
+            try:
+                if stream is not None:
+                    stream.close()
+            except OSError:
+                pass
 
 
 class HttpClient(_JsonRpc):
