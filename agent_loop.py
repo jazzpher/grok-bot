@@ -98,6 +98,22 @@ ACTION_SCHEMA = {
     'additionalProperties': False,
 }
 
+
+def result_action_schema(fields=None):
+    """Keep legacy payloads unchanged; schema tasks get a fixed text result shape."""
+    if not fields:
+        return ACTION_SCHEMA
+    import copy
+    schema = copy.deepcopy(ACTION_SCHEMA)
+    properties = {field.strip(): {'type': 'string',
+                  'description': 'Nonempty text value on done; empty string on other actions.'}
+                  for field in fields}
+    schema['properties']['result'] = {'type': 'object', 'properties': properties,
+                                      'required': list(properties), 'additionalProperties': False}
+    schema['required'].append('result')
+    return schema
+
+
 INVALID_HELP = ('Reply with ONLY one JSON object, no prose or markdown, containing every field: '
                 '{"action":"write_docx","text":"","path":"letter.docx","source_path":"","content":"# Title\\nBody line","expression":"","result":{}}. '
                 'Valid actions: ' + ', '.join(ACTION_FIELDS) + '. Use an empty string for fields you do not need. '
