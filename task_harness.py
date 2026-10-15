@@ -19,6 +19,8 @@ from urllib.parse import urlparse
 
 from agent_loop import RULES, ACTION_FIELDS, Workspace, ToolError, is_upload_path, parse_action, INVALID_HELP, MAX_INVALID, build_docx, extract_text
 
+MAX_SCHEMA_REJECTS = 3
+
 ACTIVE = ('queued', 'running')
 RESUMABLE = ('stopped', 'interrupted', 'needs_input', 'blocked')
 MAX_RETRIES = 3
@@ -186,7 +188,14 @@ class TaskManager:
                         or is_upload_path(target.relative_to(workspace.root))):
                     raise ValueError('Copy target must be separate and writable.')
 
-    def submit(self, owner, goal, history, call_model, checks=None, budgets=None, requirements=''):
+    def submit(self, owner, goal, history, call_model, checks=None, budgets=None, requirements='', result_schema=None):
+        if result_schema is not None:
+            if not isinstance(result_schema, list) or len(result_schema) > 16:
+                raise ValueError('Result schema must be a list of at most 16 required field names.')
+            for field in result_schema:
+                if not isinstance(field, str) or not field.strip() or len(field.strip()) > 64:
+                    raise ValueError('Each result field name must be nonempty text up to 64 characters.')
+            result_schema = [f.strip() for f in result_schema]
         if not isinstance(requirements, str) or len(requirements.encode('utf-8')) > 8000:
             raise ValueError('Requirements must be text up to 8 KB; include language, format, content and style.')
         if not isinstance(owner, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', owner):
@@ -212,7 +221,7 @@ class TaskManager:
         state = {'steps': 0, 'attempts': 0, 'requirements': requirements, 'messages': [{'role': 'system', 'content': context_rules + '\n' + workspace.skills.index_context(goal) + '\n' + RULES},
                   *past, {'role': 'user', 'content': goal}], 'written': [], 'checked': [],
                  'pending': None, 'budgets': limits, 'elapsed': 0, 'output': 0, 'retry_streak': 0,
-                 'failure_signature': None, 'failure_count': 0}
+                 'failure_signature': None, 'failure_count': 0, 'result_schema': result_schema}
         now = time.time()
         with self.lock, self.db:
             if self.closed or self.closing or self.busy(owner) or sum(t.is_alive() for t in self.threads.values()) >= 4:
@@ -302,6 +311,19 @@ class TaskManager:
         state['checked'] = sorted(workspace.checked)
         state['messages'].append({'role': 'user', 'content': 'Interrupted action reconciled from current artifact. No action replayed. Read and verify output again.'})
         self.save(tid, 'running', state, {'type': 'reconciled', 'text': 'Recovered interrupted action without replay.'})
+
+    @staticmethod
+    def _check_result_schema(state, result):
+        """Required-field check against the task's result schema, key matching
+        case- and punctuation-insensitive like rtrvr.ai's output validation."""
+        def norm(key):
+            return re.sub(r'[^a-z0-9]', '', str(key).lower())
+        missing = []
+        for field in state.get('result_schema') or []:
+            match = next((v for k, v in result.items() if norm(k) == norm(field)), None)
+            if match is None or (isinstance(match, str) and not match.strip()):
+                missing.append(field)
+        return missing
 
     def _verify(self, row, state, workspace):
         if workspace.written - workspace.checked:
@@ -418,8 +440,21 @@ class TaskManager:
                 if kind == 'need_input':
                     finish('needs_input', a['text'][:2000]); return
                 if kind == 'done':
+                    missing = self._check_result_schema(state, a.get('result') or {})
+                    if missing:
+                        # A schema-rejected done is not accepted, not executed and
+                        # not a tool step: refund it, with a separate small cap.
+                        state['steps'] -= 1
+                        state['schema_rejects'] = state.get('schema_rejects', 0) + 1
+                        if state['schema_rejects'] > MAX_SCHEMA_REJECTS:
+                            finish('blocked', 'The model could not produce the required result fields in %d attempts. Try a stronger model, or resubmit without the result schema, then press Resume.' % state['schema_rejects']); return
+                        state['messages'].append({'role': 'user', 'content': 'Result schema check failed: the done action is missing required result field(s): ' + ', '.join(missing) + '. Gather the data if it is not yet available, then call done again with a result object containing every required field. Nothing was accepted and this did not use a step.'})
+                        self.save(tid, 'running', state, {'type': 'check', 'text': 'Result schema check failed (%d of %d allowed); retrying without using a step.' % (state['schema_rejects'], MAX_SCHEMA_REJECTS)})
+                        continue
                     status, text = self._verify(row, state, workspace)
                     if status != 'check':
+                        if status == 'completed' and state.get('result_schema'):
+                            text = 'Result schema validated (' + ', '.join(state['result_schema']) + '). ' + text
                         state['elapsed'] = elapsed_before + time.monotonic() - started
                         # Commit terminal status and evidence under the same lock.
                         # Do not publish model self-certification as verified proof.
@@ -495,7 +530,9 @@ class TaskManager:
                     + state.get('requirements', '')
                     + '\nUser clarifications: ' + state.get('clarification', '')
                     + '\nHard acceptance checks (enforced by harness): '
-                    + json.dumps(checks or [], ensure_ascii=False)}
+                    + json.dumps(checks or [], ensure_ascii=False)
+                    + (('\nRequired result fields: when the goal is complete, call done with a "result" object containing a nonempty value for each of these: '
+                        + json.dumps(state['result_schema'], ensure_ascii=False)) if state.get('result_schema') else '')}
         messages = [state['messages'][0], contract, *state['messages'][1:]]
         limit = state['budgets']['context']
         size = lambda rows: len(json.dumps(rows, ensure_ascii=False))

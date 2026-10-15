@@ -35,7 +35,7 @@ immutable historical source. Download and independently review important results
 
 ## API
 
-- `POST /task` JSON: `message`, optional `requirements` text (8 KB), optional `checks`, optional lower `budgets`; 202
+- `POST /task` JSON: `message`, optional `requirements` text (8 KB), optional `checks`, optional lower `budgets`, optional `result_schema` (list of at most 16 required result field names; the task cannot complete until the final `done` action carries a `result` object with every field, matched case- and punctuation-insensitively; schema-rejected completions are refunded, not counted as steps, up to 3 retries); 202
   returns `id`, `status_url`. This replaces the old request-bound NDJSON protocol.
 - `GET /tasks`: most recent 50 tasks for this session.
 - `GET /tasks/ID`: status and cumulative counters.

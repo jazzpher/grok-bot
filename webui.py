@@ -384,7 +384,7 @@ def task():
         if app.config['MOCK'] and not config_snapshot()[0]:
             return {'type': 'blocked', 'text': 'Task mode needs a real API key. Mock mode cannot perform tasks.', 'step': 0}, 400
         tid = manager.submit(sid, goal, [*c['history'], *upload_context(c)], task_provider(),
-                             checks=data.get('checks'), budgets=data.get('budgets'), requirements=data.get('requirements', ''))
+                             checks=data.get('checks'), budgets=data.get('budgets'), requirements=data.get('requirements', ''), result_schema=data.get('result_schema'))
         return {'id': tid, 'status': 'queued', 'status_url': '/tasks/' + tid}, 202
     except (ValueError, OSError) as exc:
         return {'error': str(exc)}, 400
@@ -445,7 +445,7 @@ def task_status(tid):
     if not row: return {'error': 'Not found'}, 404
     return {'id': tid, 'status': row['status'], 'goal': row['goal'],
             'steps': row['state']['steps'], 'attempts': row['state'].get('attempts', row['state']['steps']), 'budgets': row['state']['budgets'],
-            'requirements': row['state'].get('requirements', ''), 'checks': row['checks'],
+            'requirements': row['state'].get('requirements', ''), 'checks': row['checks'], 'result_schema': row['state'].get('result_schema', []),
             'verification_scope': 'Only explicit checks are verified; content quality is not independently verified.',
             'elapsed': row['state']['elapsed'], 'output': row['state']['output']}
 

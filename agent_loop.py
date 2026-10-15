@@ -99,7 +99,7 @@ ACTION_SCHEMA = {
 }
 
 INVALID_HELP = ('Reply with ONLY one JSON object, no prose or markdown, containing every field: '
-                '{"action":"write_docx","text":"","path":"letter.docx","source_path":"","content":"# Title\\nBody line","expression":""}. '
+                '{"action":"write_docx","text":"","path":"letter.docx","source_path":"","content":"# Title\\nBody line","expression":"","result":{}}. '
                 'Valid actions: ' + ', '.join(ACTION_FIELDS) + '. Use an empty string for fields you do not need. '
                 'Word documents: write_docx. Nothing was executed and this did not use a step.')
 MAX_INVALID = 5
@@ -300,6 +300,11 @@ def parse_action(text):
         value = action.get(field)
         if not isinstance(value, str) or (field != 'content' and not (kind == 'save_skill' and field == 'source_path') and not value.strip()):
             raise ToolError(kind + ' requires ' + field + ' as ' + ('a string (empty allowed).' if field == 'content' else 'a nonempty string.'))
+    if 'result' in action:
+        if not isinstance(action['result'], dict):
+            raise ToolError('result must be an object of field:value pairs.')
+    else:
+        action['result'] = {}
     return action
 
 
