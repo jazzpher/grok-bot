@@ -196,6 +196,8 @@ class TaskManager:
                 if not isinstance(field, str) or not field.strip() or len(field.strip()) > 64:
                     raise ValueError('Each result field name must be nonempty text up to 64 characters.')
             result_schema = [f.strip() for f in result_schema]
+            if any(not re.sub(r'[^a-z0-9]', '', f.lower()) for f in result_schema):
+                raise ValueError('Result field names must contain an ASCII letter or digit.')
         if not isinstance(requirements, str) or len(requirements.encode('utf-8')) > 8000:
             raise ValueError('Requirements must be text up to 8 KB; include language, format, content and style.')
         if not isinstance(owner, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', owner):
@@ -321,7 +323,7 @@ class TaskManager:
         missing = []
         for field in state.get('result_schema') or []:
             match = next((v for k, v in result.items() if norm(k) == norm(field)), None)
-            if match is None or (isinstance(match, str) and not match.strip()):
+            if not isinstance(match, str) or not match.strip():
                 missing.append(field)
         return missing
 
@@ -531,7 +533,7 @@ class TaskManager:
                     + '\nUser clarifications: ' + state.get('clarification', '')
                     + '\nHard acceptance checks (enforced by harness): '
                     + json.dumps(checks or [], ensure_ascii=False)
-                    + (('\nRequired result fields: when the goal is complete, call done with a "result" object containing a nonempty value for each of these: '
+                    + (('\nRequired result fields: when the goal is complete, call done with a "result" object containing nonempty text values under these exact field names (use empty text values on other actions): '
                         + json.dumps(state['result_schema'], ensure_ascii=False)) if state.get('result_schema') else '')}
         messages = [state['messages'][0], contract, *state['messages'][1:]]
         limit = state['budgets']['context']
