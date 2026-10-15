@@ -19,7 +19,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 import requests
 from flask import Flask, Response, request, render_template, render_template_string, session, redirect, send_file
-from agent_loop import ACTION_SCHEMA, Workspace, run_loop
+from agent_loop import ACTION_SCHEMA, result_action_schema, Workspace, run_loop
 from documents import extract_text, MAX_UPLOAD
 from werkzeug.utils import secure_filename
 from task_harness import OutputBudgetExceeded, TaskManager, MAX_RETRIES, is_transient, friendly_provider_error
@@ -195,14 +195,14 @@ def config_snapshot():
                 settings.get('model_override') or app.config['MODEL'])
 
 
-def model_reply(messages, cfg, stream=False, structured=False, response_limit=None, extra=None, timeout=(10, 45)):
+def model_reply(messages, cfg, stream=False, structured=False, response_limit=None, extra=None, timeout=(10, 45), action_schema=None):
     key, url, model = cfg
     if not url_allowed(url):
         raise ValueError('Unsupported provider URL.')
     payload = {'model': model, 'messages': messages, 'stream': stream}
     if extra: payload.update(extra)
     if structured:
-        payload['response_format'] = {'type': 'json_schema', 'json_schema': {'name': 'task_action', 'strict': True, 'schema': ACTION_SCHEMA}}
+        payload['response_format'] = {'type': 'json_schema', 'json_schema': {'name': 'task_action', 'strict': True, 'schema': action_schema if action_schema is not None else ACTION_SCHEMA}}
     res = requests.post(url, headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'},
                         json=payload,
                         stream=stream or response_limit is not None, timeout=timeout)
@@ -383,7 +383,7 @@ def task():
     try:
         if app.config['MOCK'] and not config_snapshot()[0]:
             return {'type': 'blocked', 'text': 'Task mode needs a real API key. Mock mode cannot perform tasks.', 'step': 0}, 400
-        tid = manager.submit(sid, goal, [*c['history'], *upload_context(c)], task_provider(),
+        tid = manager.submit(sid, goal, [*c['history'], *upload_context(c)], (task_provider(data['result_schema']) if data.get('result_schema') else task_provider()),
                              checks=data.get('checks'), budgets=data.get('budgets'), requirements=data.get('requirements', ''), result_schema=data.get('result_schema'))
         return {'id': tid, 'status': 'queued', 'status_url': '/tasks/' + tid}, 202
     except (ValueError, OSError) as exc:
@@ -394,11 +394,11 @@ def task():
         c['busy'].release()
 
 
-def task_provider():
+def task_provider(result_schema=None):
     cfg = config_snapshot()
     def call(messages, max_output_bytes):
         response_limit = max_output_bytes * 6 + 65536
-        with model_reply(messages, cfg, structured=True, response_limit=response_limit) as res:
+        with model_reply(messages, cfg, structured=True, response_limit=response_limit, action_schema=result_action_schema(result_schema)) as res:
             response = read_limited_json_response(res, response_limit)
         choice = response['choices'][0]
         if choice.get('finish_reason') not in (None, 'stop'):
@@ -470,14 +470,15 @@ def task_stop(tid):
 @app.route('/tasks/<tid>/resume', methods=['POST'])
 def task_resume(tid):
     manager = task_manager(); sid = session['sid']
-    if not manager.get(tid, sid): return {'error': 'Not found'}, 404
+    row = manager.get(tid, sid)
+    if not row: return {'error': 'Not found'}, 404
     data = request.get_json(silent=True)
     if not isinstance(data, dict) or not isinstance(data.get('answer', ''), str) or len(data.get('answer', '')) > 12000:
         return {'error': 'Send JSON with optional answer up to 12000 characters'}, 400
     c = client()
     if not c['busy'].acquire(False): return {'error': 'Session busy'}, 409
     try:
-        if not manager.resume(tid, sid, task_provider(), data.get('answer', ''), checks=data.get('checks')):
+        if not manager.resume(tid, sid, (task_provider(row['state']['result_schema']) if row['state'].get('result_schema') else task_provider()), data.get('answer', ''), checks=data.get('checks')):
             return {'error': 'Task not resumable or session busy; budgets are not reset.'}, 409
         return {'id': tid, 'status': 'queued'}, 202
     except (ValueError, OSError) as exc:
