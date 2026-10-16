@@ -83,3 +83,11 @@ def resolve_sandbox_backend():
     if SANDBOX_BACKEND == 'auto':
         return 'docker' if docker_available() else 'subprocess'
     return SANDBOX_BACKEND
+
+# Browser tools (optional Playwright dependency)
+BROWSER_ENABLED = _choice('GROK_BROWSER_ENABLED', 'on', ('on', 'off')) == 'on'
+BROWSER_HEADLESS = _choice('GROK_BROWSER_HEADLESS', 'yes', ('yes', 'no')) == 'yes'
+BROWSER_EXECUTABLE = os.environ.get('GROK_BROWSER_EXECUTABLE', '')
+BROWSER_ARGS = [a for a in os.environ.get('GROK_BROWSER_ARGS', '').split(',') if a]
+BROWSER_TEXT_LIMIT = _int('GROK_BROWSER_TEXT_LIMIT', 12000, 200)
+BROWSER_TIMEOUT = _int('GROK_BROWSER_TIMEOUT', 30, 1)

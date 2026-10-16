@@ -354,6 +354,7 @@ class TaskManager:
             state['elapsed'] = elapsed_before + time.monotonic() - started
             return (state['elapsed'] >= state['budgets']['elapsed']
                     or state['output'] >= state['budgets']['output'])
+        workspace = None
         try:
             workspace = Workspace(self.workspaces / owner)
             workspace.written = {workspace.path(name).relative_to(workspace.root).as_posix()
@@ -487,6 +488,9 @@ class TaskManager:
             finish('blocked', str(exc))
         except Exception:
             finish('blocked', 'Task/provider failed; not complete. Check configuration and quota.')
+        finally:
+            if workspace is not None:
+                workspace.close()
 
     def _context(self, tid, state, goal, checks=None):
         """Deterministic view compaction; immutable full evidence remains in SQLite."""

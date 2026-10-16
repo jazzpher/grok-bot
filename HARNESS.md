@@ -147,3 +147,26 @@ no-write replay, copy snapshot recovery, acceptance failure, malformed output,
 retry classification, budgets, context retention, worker cap and process lock.
 Live-provider smoke tests are separate and dummy-content only; passing offline
 tests does not guarantee a given model follows the protocol or has free quota.
+
+## Browser tools (optional)
+
+The agent gains read-mostly web access: `browse_open` (navigate and read a
+page), `browse_read` (read the current page), `browse_click` (click by CSS or
+text selector), `browse_type` (fill a field), `browse_close` (release the
+browser early). One headless Chromium page lives per workspace and is closed
+when the task run ends. Page text is untrusted data, truncated to
+`GROK_BROWSER_TEXT_LIMIT` (default 12000 characters).
+
+Playwright is an optional dependency: `pip install playwright && playwright
+install chromium`. Without it, browse actions fail with an install hint instead
+of crashing the harness. Configuration: `GROK_BROWSER_ENABLED=off` disables the
+tools outright; `GROK_BROWSER_HEADLESS=no` keeps a visible window;
+`GROK_BROWSER_EXECUTABLE` points at a custom Chromium binary;
+`GROK_BROWSER_ARGS` adds launch flags (comma-separated);
+`GROK_BROWSER_TIMEOUT` bounds navigation and element waits (default 30s).
+
+Guards: only http/https URLs; localhost and private/link-local/reserved hosts
+(and `.local`, `.internal`, `.localhost`, `.arpa` suffixes) are refused before
+the browser is touched. `test_grokbot_browser.py` covers protocol registration,
+the URL guard, truncation, workspace dispatch, disabled mode, the
+missing-Playwright hint and close idempotence.
