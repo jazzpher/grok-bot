@@ -71,7 +71,50 @@ class UrlGuardTests(unittest.TestCase):
             with self.assertRaises(browser_tools.BrowserError):
                 browser_tools.check_url(bad)
 
+    @staticmethod
+    def _dns(mapping):
+        def fake(host, port, *a, **k):
+            return [(2, 1, 6, '', (mapping[host], port))]
+        return mock.patch('grokbot.netguard.socket.getaddrinfo', fake)
+
+    def test_rejects_hostname_that_resolves_to_private_ip(self):
+        for ip in ('127.0.0.1', '10.1.2.3', '192.168.0.1', '169.254.169.254', '::1'):
+            with self._dns({'evil.example.com': ip}):
+                with self.assertRaises(browser_tools.BrowserError):
+                    browser_tools.check_url('https://evil.example.com/')
+
+    def test_rejects_unresolvable_host(self):
+        with mock.patch('grokbot.netguard.socket.getaddrinfo', side_effect=OSError):
+            with self.assertRaises(browser_tools.BrowserError):
+                browser_tools.check_url('https://nope.example.com/')
+
+    def test_request_allowed_covers_redirect_hops_and_schemes(self):
+        with self._dns({'good.example.com': '93.184.216.34', 'rebind.example.com': '127.0.0.1'}):
+            self.assertTrue(browser_tools.request_allowed('https://good.example.com/x'))
+            self.assertFalse(browser_tools.request_allowed('https://rebind.example.com/'))  # redirect target
+            self.assertFalse(browser_tools.request_allowed('http://192.168.1.1/admin'))
+            self.assertFalse(browser_tools.request_allowed('file:///etc/passwd'))
+            self.assertFalse(browser_tools.request_allowed('ftp://good.example.com/'))
+        self.assertTrue(browser_tools.request_allowed('data:text/plain,hi'))
+        self.assertTrue(browser_tools.request_allowed('about:blank'))
+
+    def test_route_guard_aborts_blocked_and_continues_allowed(self):
+        class Req:
+            def __init__(self, url): self.url = url
+        class Route:
+            def __init__(self, url): self.request = Req(url); self.done = None
+            def continue_(self): self.done = 'continue'
+            def abort(self, reason): self.done = 'abort'
+        with self._dns({'good.example.com': '93.184.216.34'}):
+            ok, bad = Route('https://good.example.com/'), Route('http://127.0.0.1:8080/')
+            browser_tools._route_guard(ok); browser_tools._route_guard(bad)
+        self.assertEqual((ok.done, bad.done), ('continue', 'abort'))
+
     def test_accepts_public_http_and_https(self):
+        with self._dns({'example.com': '93.184.216.34', 'Example.COM': '93.184.216.34'}):
+            self._accepts()
+
+    def _accepts(self):
         self.assertEqual(browser_tools.check_url('https://example.com/a?b=1'),
                          'https://example.com/a?b=1')
         self.assertEqual(browser_tools.check_url('http://Example.COM'),
@@ -100,6 +143,10 @@ class WorkspaceBrowserTests(unittest.TestCase):
     def test_dispatch_uses_injected_session(self):
         fake = FakeBrowser()
         self.ws.browser = fake
+        for name in ('BROWSER_ENABLED', 'BROWSER_INTERACT'):
+            patcher = mock.patch('grokbot.config.' + name, True)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         out = self.ws.execute({'action': 'browse_open', 'url': 'https://example.com'})
         self.assertIn('TITLE: Example', out)
         self.assertEqual(fake.calls[0], ('open', 'https://example.com'))
@@ -107,6 +154,30 @@ class WorkspaceBrowserTests(unittest.TestCase):
         self.ws.execute({'action': 'browse_type', 'selector': '#q', 'content': 'hi'})
         self.ws.execute({'action': 'browse_close'})
         self.assertEqual(fake.calls[-1], ('close',))
+
+    def test_browser_is_off_by_default(self):
+        import grokbot.config as cfg, importlib, os
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('GROK_BROWSER_ENABLED', None); os.environ.pop('GROK_BROWSER_INTERACT', None)
+            importlib.reload(cfg)
+            try:
+                self.assertFalse(cfg.BROWSER_ENABLED)
+                self.assertFalse(cfg.BROWSER_INTERACT)
+            finally:
+                importlib.reload(cfg)
+
+    def test_click_and_type_need_interact_opt_in(self):
+        fake = FakeBrowser()
+        self.ws.browser = fake
+        with mock.patch('grokbot.config.BROWSER_ENABLED', True), mock.patch('grokbot.config.BROWSER_INTERACT', False):
+            self.ws.execute({'action': 'browse_open', 'url': 'https://example.com'})
+            self.ws.execute({'action': 'browse_read'})
+            for act in ({'action': 'browse_click', 'selector': '#go'},
+                        {'action': 'browse_type', 'selector': '#q', 'content': 'hi'}):
+                with self.assertRaises(ToolError) as ctx:
+                    self.ws.execute(act)
+                self.assertIn('GROK_BROWSER_INTERACT', str(ctx.exception))
+        self.assertEqual([c[0] for c in fake.calls], ['open'])
 
     def test_disabled_browser_is_a_clean_error(self):
         self.ws.browser = FakeBrowser()
@@ -118,12 +189,14 @@ class WorkspaceBrowserTests(unittest.TestCase):
 
     def test_browse_type_requires_content(self):
         self.ws.browser = FakeBrowser()
-        with self.assertRaises(ToolError):
+        with mock.patch('grokbot.config.BROWSER_ENABLED', True), mock.patch('grokbot.config.BROWSER_INTERACT', True), \
+                self.assertRaises(ToolError):
             self.ws.execute({'action': 'browse_type', 'selector': '#q', 'content': ''})
         self.assertEqual(self.ws.browser.calls, [])
 
     def test_missing_playwright_gives_install_hint(self):
-        with mock.patch.dict(sys.modules, {'playwright': None, 'playwright.sync_api': None}):
+        with mock.patch('grokbot.config.BROWSER_ENABLED', True), \
+                mock.patch.dict(sys.modules, {'playwright': None, 'playwright.sync_api': None}):
             with self.assertRaises(ToolError) as ctx:
                 self.ws.execute({'action': 'browse_open', 'url': 'https://example.com'})
         self.assertIn('pip install playwright', str(ctx.exception))
