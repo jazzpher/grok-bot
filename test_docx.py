@@ -8,7 +8,7 @@ import unittest
 import zipfile
 
 from agent_loop import Workspace, ToolError, run_loop, INVALID_HELP, MAX_INVALID
-from documents import build_docx, extract_text
+from documents import build_docx, extract_text, docx_paragraphs
 from task_harness import TaskManager
 
 LETTER = '# Office of the Mayor\nCity of Marisol, Republic of Veloria\n\nDear Ms. Lena Okafor,\nThanks & regards <fictional> "ok"\nHon. Rafael Dumont'
@@ -33,6 +33,23 @@ class BuildTests(unittest.TestCase):
     def test_unicode_and_deterministic(self):
         self.assertEqual(build_docx('Ünïcode 日本語 ✓'), build_docx('Ünïcode 日本語 ✓'))
         self.assertEqual(extract_text('x.docx', build_docx('Ünïcode 日本語 ✓')), 'Ünïcode 日本語 ✓')
+
+    def test_markdown_headings_and_bold(self):
+        text = ('# Rep\n## Office of Examples\n### Division\n#### Unit\n'
+                'This is **important** and this is not.\n | *** FBI OFFICIAL *** |')
+        raw = build_docx(text)
+        self.assertEqual(extract_text('x.docx', raw), '\n'.join(docx_paragraphs(text)))
+        got = extract_text('x.docx', raw)
+        self.assertIn(' | *** FBI OFFICIAL *** |', got)  # ascii art must not be touched
+        self.assertNotIn('**important**', got)
+        import re
+        xml = zipfile.ZipFile(io.BytesIO(raw)).read('word/document.xml').decode()
+        # heading sizes: 16/14/12/11 pt, all bold
+        for size in ('32', '28', '24', '22'):
+            self.assertIn('<w:rPr><w:b/><w:sz w:val="%s"/></w:rPr>' % size, xml)
+        # **important** is its own bold run between plain runs
+        self.assertIn('<w:t xml:space="preserve">This is </w:t></w:r><w:r><w:rPr><w:b/></w:rPr>'
+                      '<w:t xml:space="preserve">important</w:t></w:r><w:r><w:t xml:space="preserve">', xml)
 
     def test_rejects_empty_and_huge(self):
         for bad in ('', '   \n', None):
