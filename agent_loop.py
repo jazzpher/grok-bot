@@ -315,7 +315,23 @@ class Workspace:
                 raise ToolError('Candidate .docx text did not match input; original preserved. Try plain text.')
         self._write_bytes(name, data, allow_upload, validate)
         self.checked.add(rel)
-        return 'Wrote ' + rel + ' as a real Word document. Verified: opens as DOCX and extracted text matches tool input. User requirements/content quality are unverified. Offered as a download.'
+        result = ('Wrote ' + rel + ' as a real Word document. Verified: opens as DOCX and extracted '
+                  'text matches tool input. User requirements/content quality are unverified. Offered as a download.')
+        try:
+            png, reason = documents.render_doc_preview(path)
+        except Exception:
+            png, reason = None, 'unexpected error'
+        if png is not None:
+            preview = name[:-5] + '.preview.png'
+            try:
+                self._write_bytes(preview, png, allow_upload=allow_upload)
+                self.checked.add(preview)
+                result += ' Screenshot preview saved as ' + preview + ' (first page); check it visually before calling the document done.'
+            except Exception:
+                result += ' Screenshot preview failed to save; open the .docx itself to check it visually.'
+        else:
+            result += ' Screenshot preview unavailable here (' + str(reason) + ').'
+        return result
 
     def _write_bytes(self, name, content, allow_upload=False, validate=None):
         if is_upload_path(name) and not allow_upload:
