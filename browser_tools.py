@@ -5,6 +5,8 @@ click, type, close. Playwright is an optional dependency; without it the
 tools fail with an install hint instead of crashing the harness. Page text
 is untrusted data and is truncated before it reaches the model.
 """
+import concurrent.futures
+import functools
 import ipaddress
 import urllib.parse
 
@@ -90,6 +92,22 @@ def page_summary(title, url, text, limit=None):
     return 'TITLE: ' + (title or '').strip()[:300] + '\nURL: ' + (url or '')[:2000] + '\n\n' + text + note
 
 
+def _on_worker(fn):
+    """Run a BrowserSession method on the session's own worker thread.
+
+    Playwright's sync API pins itself to the thread that started it and leaves an
+    asyncio loop behind after stop(), so starting it again in the same thread fails
+    ("Sync API inside the asyncio loop"). One fresh worker thread per session
+    lifetime keeps open -> close -> open working.
+    """
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        if getattr(self, '_worker', None) is None:
+            self._worker = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix='grokbot-browser')
+        return self._worker.submit(fn, self, *args, **kwargs).result()
+    return wrapper
+
+
 class BrowserSession:
     """One headless Chromium page per Workspace, created on first use."""
 
@@ -98,6 +116,7 @@ class BrowserSession:
         self._browser = None
         self._context = None
         self._page = None
+        self._worker = None
 
     def _ensure(self):
         if self._page is not None:
@@ -121,7 +140,7 @@ class BrowserSession:
             self._page.set_default_timeout(_cfg.BROWSER_TIMEOUT * 1000)
             self._page.set_default_navigation_timeout(_cfg.BROWSER_TIMEOUT * 1000)
         except Exception as exc:
-            self.close()
+            self._close()
             raise BrowserError('Browser could not start (' + type(exc).__name__ + '). '
                                'Check the Playwright installation: pip install playwright '
                                '&& playwright install chromium.') from exc
@@ -154,6 +173,7 @@ class BrowserSession:
             raise BrowserError('Could not read the page (' + type(exc).__name__ + ').') from exc
         return page_summary(title, url, self._body_text())
 
+    @_on_worker
     def open(self, url):
         page = self._ensure()
         try:
@@ -164,10 +184,12 @@ class BrowserSession:
             raise BrowserError('Page did not load within %d seconds (%s).' % (_cfg.BROWSER_TIMEOUT, type(exc).__name__)) from exc
         return self._summary()
 
+    @_on_worker
     def text(self):
         self._ensure()
         return self._summary()
 
+    @_on_worker
     def click(self, selector):
         page = self._ensure()
         try:
@@ -176,6 +198,7 @@ class BrowserSession:
             raise BrowserError('Element not found or not clickable (%s).' % type(exc).__name__) from exc
         return self._summary()
 
+    @_on_worker
     def type(self, selector, value):
         page = self._ensure()
         if not isinstance(value, str) or not value:
@@ -187,6 +210,16 @@ class BrowserSession:
         return self._summary()
 
     def close(self):
+        worker = getattr(self, '_worker', None)
+        if worker is None:
+            return self._close()
+        try:
+            return worker.submit(self._close).result()
+        finally:
+            worker.shutdown(wait=True)
+            self._worker = None
+
+    def _close(self):
         for obj in (self._page, getattr(self, '_context', None), self._browser, self._pw):
             if obj is not None:
                 try:
