@@ -45,6 +45,7 @@ JSON_PROTOCOL = '''
 TOOL PROTOCOL (this provider has no native tool calling):
 To call a tool, reply with ONLY one JSON object and nothing else: {"tool": "<name>", "arguments": {...}}
 You will receive the result, then continue. When finished, reply with the final answer as plain Markdown (no JSON).
+If you write text first (for example a plan), still end your reply with ONLY the JSON tool object: put nothing after it. Never claim a tool ran unless you received its result.
 Available tools:
 '''
 
@@ -161,6 +162,32 @@ def build_system_prompt(ctx, registry, policy, goal='', model_label='', extra=''
 _JSON_FENCE = re.compile(r'```(?:json|tool)?\s*(\{.*?\})\s*```', re.S)
 
 
+def _balanced_json_objects(text):
+    """Spans (start, end) of top-level {...} objects, string- and escape-aware."""
+    spans, depth, obj_start = [], 0, 0
+    in_str = esc = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == '\\':
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == '{':
+            if depth == 0:
+                obj_start = i
+            depth += 1
+        elif ch == '}':
+            if depth:
+                depth -= 1
+                if depth == 0:
+                    spans.append((obj_start, i + 1))
+    return spans
+
+
 def parse_json_tool_call(text):
     """Return (name, arguments) if the text is a JSON-protocol tool call, else None."""
     if not isinstance(text, str):
@@ -169,12 +196,12 @@ def parse_json_tool_call(text):
     stripped = text.strip()
     if stripped.startswith('{') and stripped.endswith('}'):
         candidates.append(stripped)
-    candidates += _JSON_FENCE.findall(text)
-    start, end = stripped.find('{'), stripped.rfind('}')
-    # A JSON object embedded in a short lead-in ("Let me check: {...}") counts; a tool-shaped object quoted
-    # inside a long prose answer does not, so explanations about the protocol are never executed.
-    if start >= 0 and end > start and len(stripped) - (end + 1 - start) <= 160:
-        candidates.append(stripped[start:end + 1])
+    candidates += _JSON_FENCE.findall(stripped)
+    # A tool-shaped object counts when it IS the message (exact or fenced) or when it sits at the END of
+    # the reply, where models put the call after a plan. One quoted inside a long prose answer does not,
+    # so explanations about the protocol are never executed.
+    tail_spans = [span for span in _balanced_json_objects(stripped) if len(stripped) - span[1] <= 80]
+    candidates += [stripped[a:b] for a, b in reversed(tail_spans)]
     for candidate in candidates:
         try:
             data = json.loads(candidate)
