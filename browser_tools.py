@@ -8,7 +8,7 @@ is untrusted data and is truncated before it reaches the model.
 import ipaddress
 import urllib.parse
 
-from grokbot import config as _cfg
+from grokbot import config as _cfg, netguard
 
 _BLOCKED_HOSTS = {'localhost', '0.0.0.0', '::1', '[::1]'}
 _BLOCKED_SUFFIXES = ('.local', '.internal', '.localhost', '.arpa')
@@ -34,13 +34,40 @@ def check_url(url):
     host = (parsed.hostname or '').strip().lower().rstrip('.')
     if not host or host in _BLOCKED_HOSTS or host.endswith(_BLOCKED_SUFFIXES):
         raise BrowserError('Local and private addresses are not reachable from browser tools.')
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return url
-    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-        raise BrowserError('Local and private addresses are not reachable from browser tools.')
+    # Resolves DNS and refuses private/loopback/link-local/reserved results, so a public
+    # hostname that points at 127.0.0.1 or the router is blocked too.
+    err = netguard.public_url_error(url, schemes=('http', 'https'), max_length=2000, what='Browser tools')
+    if err:
+        raise BrowserError('Local and private addresses are not reachable from browser tools.'
+                           if 'public' in err else err)
     return url
+
+
+_SAFE_INLINE = ('data', 'blob', 'about')
+
+
+def request_allowed(url):
+    """True when a browser request (navigation, redirect hop or subresource) may proceed."""
+    scheme = urllib.parse.urlparse(url).scheme.lower()
+    if scheme in _SAFE_INLINE:
+        return True
+    try:
+        check_url(url)
+    except BrowserError:
+        return False
+    return True
+
+
+def _route_guard(route):
+    """Playwright route handler: every request, including each redirect hop, is vetted."""
+    try:
+        allowed = request_allowed(route.request.url)
+    except Exception:
+        allowed = False
+    try:
+        route.continue_() if allowed else route.abort('blockedbyclient')
+    except Exception:
+        pass
 
 
 def _check_selector(selector):
@@ -69,6 +96,7 @@ class BrowserSession:
     def __init__(self):
         self._pw = None
         self._browser = None
+        self._context = None
         self._page = None
 
     def _ensure(self):
@@ -87,7 +115,9 @@ class BrowserSession:
             if _cfg.BROWSER_ARGS:
                 kwargs['args'] = list(_cfg.BROWSER_ARGS)
             self._browser = self._pw.chromium.launch(**kwargs)
-            self._page = self._browser.new_page()
+            self._context = self._browser.new_context()
+            self._context.route('**/*', _route_guard)
+            self._page = self._context.new_page()
             self._page.set_default_timeout(_cfg.BROWSER_TIMEOUT * 1000)
             self._page.set_default_navigation_timeout(_cfg.BROWSER_TIMEOUT * 1000)
         except Exception as exc:
@@ -96,6 +126,16 @@ class BrowserSession:
                                'Check the Playwright installation: pip install playwright '
                                '&& playwright install chromium.') from exc
         return self._page
+
+    def _verify_location(self):
+        """Refuse to read a page that ended up somewhere private (redirect, click, script)."""
+        url = self._page.url
+        if url and url != 'about:blank' and not request_allowed(url):
+            try:
+                self._page.goto('about:blank')
+            except Exception:
+                pass
+            raise BrowserError('The page ended up at a local or private address; blocked.')
 
     def _body_text(self):
         page = self._page
@@ -106,6 +146,7 @@ class BrowserSession:
 
     def _summary(self):
         page = self._page
+        self._verify_location()
         try:
             title = page.title()
             url = page.url
@@ -146,11 +187,11 @@ class BrowserSession:
         return self._summary()
 
     def close(self):
-        for obj in (self._page, self._browser, self._pw):
+        for obj in (self._page, getattr(self, '_context', None), self._browser, self._pw):
             if obj is not None:
                 try:
                     obj.close()
                 except Exception:
                     pass
-        self._page = self._browser = self._pw = None
+        self._page = self._context = self._browser = self._pw = None
         return 'Browser closed.'
