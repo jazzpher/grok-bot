@@ -85,7 +85,9 @@ def resolve_sandbox_backend():
     return SANDBOX_BACKEND
 
 # Browser tools (optional Playwright dependency)
-BROWSER_ENABLED = _choice('GROK_BROWSER_ENABLED', 'on', ('on', 'off')) == 'on'
+BROWSER_ENABLED = _choice('GROK_BROWSER_ENABLED', 'off', ('on', 'off')) == 'on'
+# click/type can act on pages; the task loop has no approval prompt, so they need their own opt-in.
+BROWSER_INTERACT = _choice('GROK_BROWSER_INTERACT', 'off', ('on', 'off')) == 'on'
 BROWSER_HEADLESS = _choice('GROK_BROWSER_HEADLESS', 'yes', ('yes', 'no')) == 'yes'
 BROWSER_EXECUTABLE = os.environ.get('GROK_BROWSER_EXECUTABLE', '')
 BROWSER_ARGS = [a for a in os.environ.get('GROK_BROWSER_ARGS', '').split(',') if a]
