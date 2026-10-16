@@ -508,6 +508,7 @@ function argRow(name, arg) {
     }
   }
   row._out = el('pre', 'aout', '');
+  row.appendChild(sum);
   row.appendChild(row._out);
   return row;
 }

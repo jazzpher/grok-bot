@@ -240,8 +240,8 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .arow { margin: 1px 0; font-size: 12.5px; border: 0; background: transparent; }
 .arow summary { cursor: pointer; display: flex; gap: 7px; align-items: center; list-style: none; padding: 3px 2px; color: var(--muted); min-width: 0; }
 .arow summary::-webkit-details-marker { display: none; }
-.arow summary::before { content: '\\25B8'; color: var(--muted2); font-size: 9px; flex: none; }
-.arow[open] summary::before { content: '\\25BE'; }
+.arow summary::before { content: '\25B8'; color: var(--muted2); font-size: 9px; flex: none; }
+.arow[open] summary::before { content: '\25BE'; }
 .aicon { display: inline-flex; color: var(--muted2); flex: none; }
 .aicon svg { display: block; }
 .averb { color: var(--muted); flex: none; }
