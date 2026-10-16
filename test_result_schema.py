@@ -15,7 +15,7 @@ class ResultSchemaTests(unittest.TestCase):
             def __enter__(self): return self
             def __exit__(self, *args): pass
             def iter_content(self, chunk_size):
-                yield json.dumps({'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps({'action': 'done', 'text': 'ok', 'path': '', 'source_path': '', 'content': '', 'expression': '', 'result': {'Summary': 'hello'}})}}]}).encode()
+                yield json.dumps({'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps({'action': 'done', 'text': 'ok', 'path': '', 'source_path': '', 'content': '', 'expression': '', 'url': '', 'selector': '', 'result': {'Summary': 'hello'}})}}]}).encode()
         def post(*args, **kwargs):
             payloads.append(kwargs['json'])
             return Reply()

@@ -147,3 +147,39 @@ no-write replay, copy snapshot recovery, acceptance failure, malformed output,
 retry classification, budgets, context retention, worker cap and process lock.
 Live-provider smoke tests are separate and dummy-content only; passing offline
 tests does not guarantee a given model follows the protocol or has free quota.
+
+## Browser tools (optional)
+
+The agent can optionally get read-mostly web access: `browse_open` (navigate and
+read a page), `browse_read` (read the current page), `browse_click` (click by
+CSS or text selector), `browse_type` (fill a field), `browse_close` (release the
+browser early). One headless Chromium page lives per workspace and is closed
+when the task run ends. Page text is untrusted data, truncated to
+`GROK_BROWSER_TEXT_LIMIT` (default 12000 characters).
+
+**Off by default.** `GROK_BROWSER_ENABLED=on` turns on open/read/close.
+`browse_click` and `browse_type` can act on pages (submit forms, trigger
+requests), and the task loop has no approval prompt, so they need a second
+opt-in: `GROK_BROWSER_INTERACT=on`. Until then they return an error.
+
+Playwright is an optional dependency: `pip install playwright && playwright
+install chromium`. Without it, browse actions fail with an install hint instead
+of crashing the harness. Other settings: `GROK_BROWSER_HEADLESS=no` keeps a
+visible window; `GROK_BROWSER_EXECUTABLE` points at a custom Chromium binary;
+`GROK_BROWSER_ARGS` adds launch flags (comma-separated);
+`GROK_BROWSER_TIMEOUT` bounds navigation and element waits (default 30s).
+
+Guards: only http/https URLs. Every URL is checked with `grokbot.netguard`:
+hostnames are resolved and anything that points at a private, loopback,
+link-local, multicast or reserved address is refused (so a public name that
+resolves to 127.0.0.1 is blocked), as are `.local`, `.internal`, `.localhost`
+and `.arpa` names and unresolvable hosts. The check also runs on every browser
+request through a Playwright route, which covers redirect hops, subresources
+and navigations caused by clicks, and again on the final page URL before text
+is read. This is best-effort: like `fetch_url`, it does not defend against DNS
+rebinding between the check and the connection, and WebSocket traffic is not
+routed.
+`test_grokbot_browser.py` covers protocol registration,
+the URL guard (including DNS-to-private and redirect hops), default-off and
+the interact opt-in, truncation, workspace dispatch, the missing-Playwright
+hint and close idempotence.
