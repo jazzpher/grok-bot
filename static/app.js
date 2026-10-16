@@ -479,10 +479,43 @@ function showFileChips(view) {
   }
   scrollChat();
 }
+const ROW_VERBS = {
+  browse_open: ['Fetched', 'url'], browse_read: ['Read', 'url'], browse_click: ['Clicked', 'code'],
+  browse_type: ['Typed', 'code'], read_file: ['Read', 'path'], read_skill: ['Read', 'path'],
+  write_file: ['Created', 'path'], write_docx: ['Created', 'path'], save_skill: ['Saved', 'path'],
+  copy_file: ['Copied', 'path'], compare_files: ['Compared', 'path'], calculate: ['Calculated', 'code'],
+  list_files: ['Listed', 'files'], list_skills: ['Listed', 'skills'], browse_close: ['Closed', 'browser'],
+};
+function iconSvg() {
+  const s = el('span', 'aicon');
+  s.innerHTML = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M4 1.5h5.5L13 5v9.5H4z"/><path d="M9 1.5V5h4"/></svg>';
+  return s;
+}
+function argRow(name, arg) {
+  const def = ROW_VERBS[name] || ['Used', 'code'];
+  const row = el('details', 'arow running');
+  const sum = el('summary');
+  sum.appendChild(iconSvg());
+  sum.appendChild(el('span', 'averb', def[0]));
+  if (arg) {
+    if (def[1] === 'url' && /^https?:\/\//i.test(arg)) {
+      const a = document.createElement('a');
+      a.className = 'alink'; a.href = arg; a.target = '_blank'; a.rel = 'noopener';
+      a.textContent = arg.length > 72 ? arg.slice(0, 72) + '\u2026' : arg;
+      sum.appendChild(a);
+    } else {
+      sum.appendChild(el('code', 'aarg', arg.length > 80 ? arg.slice(0, 80) + '\u2026' : arg));
+    }
+  }
+  row._out = el('pre', 'aout', '');
+  row.appendChild(sum);
+  row.appendChild(row._out);
+  return row;
+}
 function taskViewInit(view, bubble) {
   if (view.state) return view.state;
   if (typeof bubble.appendChild !== 'function') return null;
-  view.state = {raw: [], lastCard: null, lastMeta: null, status: null, rawEl: null, rawDet: null, btns: []};
+  view.state = {raw: [], lastCard: null, lastMeta: null, status: null, rawEl: null, rawDet: null, btns: [], title: null};
   bubble.textContent = '';
   bubble.className = 'msg grok';
   return view.state;
@@ -516,29 +549,22 @@ function taskEvent(view, bubble, e) {
   if (st.rawEl) st.rawEl.textContent = st.raw.join('\n');
   const text = e.text || '';
   switch (e.type) {
-    case 'status': taskStatusLine(st, bubble, text === 'Running' ? 'orchestrating…' : text); break;
+    case 'status': taskStatusLine(st, bubble, text === 'Running' ? '' : text); break;
     case 'plan': if (text) bubble.appendChild(el('div', 'tplan', text.length > 220 ? text.slice(0, 220) + '…' : text)); break;
     case 'action': {
       st.lastCard = null; st.lastMeta = null;
       const m = text.match(/Executing (\S+)/);
-      const card = el('details', 'toolcard running');
-      const sum = el('summary');
-      sum.appendChild(el('span', 'tuse', 'used'));
-      sum.appendChild(el('b', '', m ? m[1] : (text.slice(0, 40) || 'tool')));
-      const meta = el('span', 'tmeta', 'running');
-      sum.appendChild(meta);
-      card.appendChild(sum);
-      st.lastCard = card; st.lastMeta = meta;
-      bubble.appendChild(card);
+      const row = argRow(m ? m[1] : (text.slice(0, 40) || 'tool'), e.arg || '');
+      st.lastCard = row; st.lastMeta = row._out;
+      bubble.appendChild(row);
       break;
     }
     case 'tool': {
-      const card = st.lastCard;
-      if (!card) { bubble.appendChild(el('div', 'tplan', text.length > 220 ? text.slice(0, 220) + '…' : text)); break; }
+      const row = st.lastCard;
+      if (!row) { bubble.appendChild(el('div', 'tplan', text.length > 220 ? text.slice(0, 220) + '…' : text)); break; }
       const failed = text.startsWith('Tool failed');
-      card.className = 'toolcard ' + (failed ? 'err' : 'ok');
-      if (st.lastMeta) st.lastMeta.textContent = failed ? 'failed' : 'done';
-      card.appendChild(el('pre', 'tout', text.length > 4000 ? text.slice(0, 4000) + '…' : text));
+      row.className = 'arow ' + (failed ? 'err' : 'ok');
+      if (st.lastMeta) st.lastMeta.textContent = text.length > 4000 ? text.slice(0, 4000) + '…' : text;
       st.lastCard = null; st.lastMeta = null;
       break;
     }
@@ -579,6 +605,10 @@ async function watchTask(id, bubble) {
       for (const e of events) { if (e.type === 'retry') retryText = e.text; else if (e.type !== 'progress') retryText = ''; taskEvent(view, bubble, e); }
       const sr = await fetch('/tasks/' + id); if (!sr.ok) throw new Error('Could not load task status');
       const row = await sr.json();
+      if (view.state && !view.state.title && row.goal) {
+        const t = el('div', 'ttitle', row.goal.length > 90 ? row.goal.slice(0, 90) + '…' : row.goal);
+        view.state.title = t; bubble.insertBefore(t, bubble.firstChild);
+      }
       document.getElementById('status').textContent = (row.status === 'running' && retryText) ? retryText : row.status + ' · step ' + row.steps + (row.attempts === undefined ? '' : ' · provider attempts ' + row.attempts + '/' + row.budgets.steps);
       taskStatuses.set(id, row.status); updateStopButton();
       if (!['queued', 'running'].includes(row.status)) {
@@ -590,6 +620,7 @@ async function watchTask(id, bubble) {
           if (finalEvents.length < 200) break;
         }
         if (view.state) { finishTaskStatus(view.state, bubble, row.status); appendRawLog(view, bubble); }
+        if (view.state && row.elapsed) { const s = Math.round(row.elapsed); bubble.appendChild(el('div', 'tmetafoot', s >= 60 ? Math.floor(s / 60) + 'm ' + (s % 60) + 's' : s + 's')); }
         else collapseLog(bubble);
         showFileChips(view);
         if (['blocked', 'interrupted', 'stopped', 'needs_input'].includes(row.status)) addResumeButton(id, bubble, view);

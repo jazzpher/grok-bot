@@ -144,12 +144,12 @@
     <span id="skillstatus" role="status" aria-live="polite"></span>
   </section>
 
-  <div id="chatwrap"><div id="chat"><div class="hint">Ask anything. The agent can read and edit workspace files, run commands in the sandbox, search the web, and remember skills. Tool calls appear as cards you can expand.</div></div></div>
+  <div id="chatwrap"><div id="chat"><div class="hero">What would you like to do?<span>Ask anything. The agent reads and edits workspace files, runs commands in the sandbox, browses the web, and remembers skills.</span></div></div></div>
 
   <div id="bar">
     <div id="composer">
       <div id="attachments" class="attachments" hidden></div>
-      <textarea id="in" rows="1" placeholder="Message grok-bot — Shift+Enter for a new line, / for commands, drop files or images here" autofocus></textarea>
+      <textarea id="in" rows="1" placeholder="What would you like to do?" autofocus></textarea>
       <div id="composer-row">
         <label class="tool" title="Upload a document into the workspace">+ <input id="upload" type="file" style="display:none" aria-label="Upload document" accept=".txt,.md,.csv,.json,.py,.js,.ts,.html,.css,.pdf,.docx,.yaml,.yml,.toml" onchange="uploadFile(this)"></label>
         <label class="tool" title="Attach images for a vision-capable model">🖼 <input id="imgupload" type="file" style="display:none" aria-label="Attach image" accept="image/png,image/jpeg,image/webp,image/gif" multiple onchange="attachImages(this.files); this.value=''"></label>
