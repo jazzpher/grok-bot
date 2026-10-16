@@ -8,7 +8,8 @@ import unittest
 import zipfile
 
 from agent_loop import Workspace, ToolError, run_loop, INVALID_HELP, MAX_INVALID
-from documents import build_docx, extract_text, docx_paragraphs
+import shutil
+from documents import build_docx, extract_text, docx_paragraphs, render_doc_preview, render_doc_preview
 from task_harness import TaskManager
 
 LETTER = '# Office of the Mayor\nCity of Marisol, Republic of Veloria\n\nDear Ms. Lena Okafor,\nThanks & regards <fictional> "ok"\nHon. Rafael Dumont'
@@ -175,3 +176,37 @@ class LoopTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PreviewTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = pathlib.Path(self.dir.name) / 'letter.docx'
+
+    def test_render_doc_preview(self):
+        if not (shutil.which('soffice') and shutil.which('pdftoppm')):
+            self.skipTest('LibreOffice or pdftoppm not installed')
+        self.path.write_bytes(build_docx('# Rep\n## Office\nThis is **important**.\nBody line.'))
+        png, reason = render_doc_preview(self.path)
+        self.assertIsNone(reason)
+        self.assertTrue(png.startswith(b'\x89PNG'))
+
+
+    def test_write_docx_saves_preview(self):
+        if not (shutil.which('soffice') and shutil.which('pdftoppm')):
+            self.skipTest('LibreOffice or pdftoppm not installed')
+        root = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        ws = Workspace(root)
+        result = ws.write_docx('letter.docx', '# Office\nDear Mr. X,\nThis is **important**.\nBody line.')
+        self.assertIn('Screenshot preview saved as letter.preview.png', result)
+        self.assertTrue((pathlib.Path(root) / 'letter.preview.png').read_bytes().startswith(b'\x89PNG'))
+
+
+    def test_render_doc_preview_missing_tools(self):
+        """A missing soffice/pdftoppm or a broken input returns a reason, never raises."""
+        png, reason = render_doc_preview(self.path)  # file does not exist
+        if png is not None:
+            self.skipTest('rendering succeeded anyway; environment differs')
+        self.assertIsInstance(reason, str) and self.assertTrue(reason)

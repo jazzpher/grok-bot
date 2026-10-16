@@ -133,3 +133,36 @@ def build_docx(text):
             info.compress_type = zipfile.ZIP_DEFLATED
             archive.writestr(info, xml.encode('utf-8'))
     return buf.getvalue()
+
+
+def render_doc_preview(path):
+    """Screenshot a saved .docx: LibreOffice renders it to PDF, pdftoppm to a PNG of the
+    first page. Returns (png_bytes, None), or (None, reason) when the tools are missing
+    or the render fails; it never raises, so callers can treat a preview as best effort."""
+    import shutil
+    import subprocess
+    import tempfile
+    soffice = shutil.which('soffice') or shutil.which('libreoffice')
+    pdftoppm = shutil.which('pdftoppm')
+    if not soffice or not pdftoppm:
+        return None, 'LibreOffice or pdftoppm not installed'
+    path = pathlib.Path(path)
+    try:
+        with tempfile.TemporaryDirectory(prefix='docx_preview_') as tmp:
+            profile = pathlib.Path(tmp) / 'profile'
+            subprocess.run(
+                [soffice, '-env:UserInstallation=file://' + str(profile), '--headless',
+                 '--convert-to', 'pdf', '--outdir', tmp, str(path)],
+                timeout=90, capture_output=True)
+            pdfs = sorted(pathlib.Path(tmp).glob('*.pdf'))
+            if not pdfs:
+                return None, 'PDF conversion produced no output'
+            subprocess.run([pdftoppm, '-png', '-r', '90', '-f', '1', '-l', '1',
+                            str(pdfs[0]), str(pathlib.Path(tmp) / 'page')],
+                           timeout=60, capture_output=True)
+            pngs = sorted(pathlib.Path(tmp).glob('page*.png'))
+            if not pngs:
+                return None, 'PNG rendering produced no output'
+            return pngs[0].read_bytes(), None
+    except Exception as exc:  # noqa: BLE001 - preview must never break the write
+        return None, type(exc).__name__

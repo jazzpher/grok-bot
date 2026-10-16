@@ -332,7 +332,8 @@ class TaskManager:
         if workspace.written - workspace.checked:
             return 'check', 'Read these written files first: ' + ', '.join(sorted(workspace.written - workspace.checked))
         if not row['checks']:
-            docs = sorted(workspace.written)
+            # Preview screenshots are verification aids, not user artifacts.
+            docs = sorted(n for n in workspace.written if not n.lower().endswith('.preview.png'))
             if docs and all(n.lower().endswith('.docx') for n in docs) and not workspace.written - workspace.checked:
                 # Built-in check for Word output: each saved file must reopen as DOCX with text.
                 for n in docs:
