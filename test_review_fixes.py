@@ -11,7 +11,7 @@ class ReviewFixTests(unittest.TestCase):
     wait_worker_gone = test_harness.HarnessTests.wait_worker_gone
     def test_missing_checks_resume_validates_persists_and_keeps_budgets(self):
         m=self.manager()
-        tid=m.submit('alice','make output',[],lambda _:action('done',text='unchecked'),budgets={'steps':5})
+        tid=m.submit('alice','make output',[],lambda _:action('need_input',text='paused for review'),budgets={'steps':5})
         original=self.wait(m,tid); self.wait_worker_gone(m,tid)
         checks=[{'type':'file_text','path':'out','text':'ok'}]
         self.assertFalse(m.resume(tid,'bob',lambda _: '',checks=checks))
