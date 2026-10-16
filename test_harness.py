@@ -354,3 +354,53 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(reopened.get(tid, 'alice')['status'], 'completed')
         self.assertIsNone(reopened.get(tid, 'bob'))
         self.assertEqual(reopened.events(tid, 'bob'), [])
+
+    def test_done_result_defaults_to_object_and_must_be_object(self):
+        from agent_loop import parse_action, ToolError
+        self.assertEqual(parse_action(action('done', text='ok'))['result'], {})
+        with self.assertRaises(ToolError):
+            parse_action(action('done', text='ok', result='nope'))
+
+    def test_result_schema_input_is_validated(self):
+        m = self.manager()
+        for bad in ('summary', ['a', 5], [''] * 17, ['x' * 65]):
+            with self.assertRaises(ValueError):
+                m.submit('alice', 'g', [], lambda _: action('done', text='ok'), result_schema=bad)
+        self.assertEqual(m.list('alice'), [])
+        m.close()
+
+    def test_result_schema_gates_done_with_refund(self):
+        m = self.manager()
+        replies = iter([
+            action('write_file', path='out.txt', content='hello'),
+            action('read_file', path='out.txt'),
+            action('done', text='ok', result={'Title': 'hello'}),
+            action('done', text='ok', result={'S U M-MARY.': 'hello', 'title': 'hi'}),
+        ])
+        tid = m.submit('alice', 'Write hello', [], lambda _: next(replies),
+                       checks=[{'type': 'file_text', 'path': 'out.txt', 'text': 'hello'}],
+                       result_schema=['summary'])
+        row = self.wait(m, tid)
+        self.wait_worker_gone(m, tid)
+        self.assertEqual(row['status'], 'completed')
+        self.assertEqual(row['state']['steps'], 3)
+        self.assertEqual(row['state'].get('schema_rejects'), 1)
+        events = m.events(tid, 'alice')
+        self.assertTrue(any(e['type'] == 'check' and 'Result schema check failed' in e['text'] for e in events))
+        self.assertTrue(any(e['type'] == 'verification' and e['text'].startswith('Result schema validated (summary).') for e in events))
+        m.close()
+
+    def test_result_schema_rejects_are_bounded(self):
+        m = self.manager()
+        replies = iter([action('write_file', path='out.txt', content='hello'),
+                        action('read_file', path='out.txt')]
+                       + [action('done', text='ok') for _ in range(4)])
+        tid = m.submit('alice', 'Write hello', [], lambda _: next(replies),
+                       checks=[{'type': 'file_text', 'path': 'out.txt', 'text': 'hello'}],
+                       result_schema=['summary'])
+        row = self.wait(m, tid)
+        self.wait_worker_gone(m, tid)
+        self.assertEqual(row['status'], 'blocked')
+        self.assertEqual(row['state'].get('schema_rejects'), 4)
+        self.assertIn('required result fields in 4 attempts', m.events(tid, 'alice')[-1]['text'])
+        m.close()
