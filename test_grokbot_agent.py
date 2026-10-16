@@ -151,6 +151,20 @@ class RunTurnTests(unittest.TestCase):
         self.assertIsNone(agent_core.parse_json_tool_call(prose))
         self.assertIsNone(agent_core.parse_json_tool_call('{"final": "no tool"}'))
 
+    def test_parse_json_tool_call_after_plan(self):
+        # Regression: a plan followed by the tool call must still parse, whatever its length
+        # (seen live on NVIDIA NIM gemma: the whole reply was dropped as prose).
+        call = '{"tool": "write_docx", "arguments": {"content": "' + 'line\\n' * 60 + '", "path": "letter.docx"}}'
+        text = 'I will create a sample letter.\n\nPlan:\n1. Write the content.\n2. Use the write_docx tool.\n\n' + call
+        self.assertEqual(agent_core.parse_json_tool_call(text)[0], 'write_docx')
+        self.assertEqual(agent_core.parse_json_tool_call('Do it: {"tool": "x", "arguments": {}} - running it.'), ('x', {}))
+        # braces inside string values do not break the balanced scan
+        self.assertEqual(
+            agent_core.parse_json_tool_call('{"tool": "x", "arguments": {"content": "brace } here"}}'),
+            ('x', {'content': 'brace } here'}))
+        # the last near-end object wins when several are present
+        self.assertEqual(agent_core.parse_json_tool_call('{"tool": "a", "arguments": {}} note {"tool": "b", "arguments": {}}'), ('b', {}))
+
     def test_project_instructions_are_loaded(self):
         self.ws.path('AGENTS.md').write_text('Always run pytest before finishing.')
         fn = scripted([text_events('ok')])
