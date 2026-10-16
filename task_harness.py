@@ -478,7 +478,21 @@ class TaskManager:
                     source = workspace.path(a['source_path'])
                     if source.is_file() and source.stat().st_size <= 32000:
                         state['pending_digest'] = hashlib.sha256(source.read_bytes()).hexdigest()
-                self.save(tid, 'running', state, {'type': 'action', 'text': 'Executing ' + kind})
+                arg = ''
+                if kind == 'browse_open':
+                    arg = a.get('url') or ''
+                    state['last_url'] = arg
+                elif kind == 'browse_read':
+                    arg = state.get('last_url') or ''
+                elif kind in ('browse_click', 'browse_type'):
+                    arg = a.get('selector') or ''
+                elif kind in ('read_file', 'read_skill', 'write_file', 'write_docx', 'save_skill'):
+                    arg = a.get('path') or ''
+                elif kind in ('copy_file', 'compare_files'):
+                    arg = (a.get('source_path') or '') + ' -> ' + (a.get('path') or '')
+                elif kind == 'calculate':
+                    arg = a.get('expression') or ''
+                self.save(tid, 'running', state, {'type': 'action', 'text': 'Executing ' + kind, 'arg': arg})
                 remaining_output = state['budgets']['output'] - state['output']
                 try:
                     if kind == 'save_skill':
