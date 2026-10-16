@@ -27,7 +27,14 @@ class ResumeHTTPTests(__import__('unittest').TestCase):
             self.assertEqual(self.b.get(self.url+'/tasks/'+tid).status_code, 404)
 
     def test_checks_on_resume_route_validates_owner_and_publishes_verified_result(self):
-        def provider(): return lambda _:json.dumps({'action':'done','text':'HTTP_FINAL_SENTINEL'})
+        calls = []
+        def provider():
+            def f(_):
+                calls.append(1)
+                if len(calls) == 1:
+                    return json.dumps({'action':'need_input','text':'paused for checks'})
+                return json.dumps({'action':'done','text':'HTTP_FINAL_SENTINEL'})
+            return f
         with patch.object(webui,'task_provider',provider):
             r=self.a.post(self.url+'/task',json={'message':'verify artifact'})
             self.assertEqual(r.status_code,202); tid=r.json()['id']

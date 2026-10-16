@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 from agent_loop import RULES, ACTION_FIELDS, Workspace, ToolError, is_upload_path, parse_action, INVALID_HELP, MAX_INVALID, build_docx, extract_text
 
 MAX_SCHEMA_REJECTS = 3
+MAX_SELF_VERIFY = 1  # one autonomous self-verification round before done is accepted
 
 ACTIVE = ('queued', 'running')
 RESUMABLE = ('stopped', 'interrupted', 'needs_input', 'blocked')
@@ -327,7 +328,7 @@ class TaskManager:
                 missing.append(field)
         return missing
 
-    def _verify(self, row, state, workspace):
+    def _verify(self, row, state, workspace, gate=False):
         if workspace.written - workspace.checked:
             return 'check', 'Read these written files first: ' + ', '.join(sorted(workspace.written - workspace.checked))
         if not row['checks']:
@@ -342,7 +343,30 @@ class TaskManager:
                     except Exception:
                         return 'check', 'Word document failed to open as DOCX: ' + n
                 return 'completed', 'Word document(s) reopened as DOCX with text present: ' + ', '.join(docs) + '. Only that was verified; language, content and style were not independently checked, so review the download.'
-            return 'needs_input', ('Artifact-created/content-unverified: read-back checked for ' + ', '.join(docs) + '. ' if docs else 'Content-unverified: ') + 'No deterministic acceptance checks supplied. Review the draft/downloads, or specify the output path and full expected text (file_text), or source/target paths (exact_copy). What specific content or format needs revision?'
+            if gate:
+                return 'needs_input', ('No deterministic acceptance checks supplied; learned skills require '
+                    'verified task artifacts (file_text or exact_copy checks, or the built-in Word check).')
+            rounds = state.get('self_verify', 0)
+            if docs and rounds < MAX_SELF_VERIFY:
+                # No user prompt: the task assistant verifies its own output.
+                state['self_verify'] = rounds + 1
+                return 'check', ('Verify your own output before done; do not ask the user to review it. '
+                    'Read back ' + ', '.join(docs) + ' and compare each against the goal\'s requirements, '
+                    'fix any mismatch yourself, then call done again stating what you checked and what matched. '
+                    'A claim you did not check stays a claim, not evidence.')
+            if docs:
+                return 'completed_unverified', ('Task finished after ' + str(rounds) + ' self-verification round(s); read-back checked for '
+                    + ', '.join(docs) + '. Requirements, relevance and quality were checked by the task assistant itself, not '
+                    'independently; review the downloads at your leisure.')
+            if state.get('any_failure'):
+                if rounds < MAX_SELF_VERIFY:
+                    state['self_verify'] = rounds + 1
+                    return 'check', ('A tool failed during this task and no file was produced. Fix the failure yourself '
+                        'or report specifically what is missing, then call done again. Do not ask the user to review.')
+                return 'needs_input', ('A tool failed during this task and no artifact was produced. '
+                    'Fix or restate the goal, then resume.')
+            return 'completed_unverified', ('Answer delivered directly (no file artifacts). Content was not independently verified; '
+                'it reflects the task assistant\'s own review of the goal.')
         for c in row['checks']:
             p = workspace.path(c['path'])
             if not p.is_file() or p.stat().st_size > 32000:
@@ -456,13 +480,15 @@ class TaskManager:
                         continue
                     status, text = self._verify(row, state, workspace)
                     if status != 'check':
+                        final = 'completed' if status in ('completed', 'completed_unverified') else status
                         if status == 'completed' and state.get('result_schema'):
                             text = 'Result schema validated (' + ', '.join(state['result_schema']) + '). ' + text
                         state['elapsed'] = elapsed_before + time.monotonic() - started
                         # Commit terminal status and evidence under the same lock.
-                        # Do not publish model self-certification as verified proof.
+                        # Do not publish model self-certification as verified proof:
+                        # only check-backed completions get a result event.
                         result_events = [{'type': 'result', 'text': text, 'step': state['steps']}] if status == 'completed' else []
-                        self.save(tid, status, state, {'type': 'verification', 'text': text, 'step': state['steps']}, result_events)
+                        self.save(tid, final, state, {'type': 'verification', 'text': text, 'step': state['steps']}, result_events)
                         return
                     state['messages'].append({'role': 'user', 'content': text})
                     self.save(tid, 'running', state, {'type': 'check', 'text': text}); continue
@@ -496,7 +522,7 @@ class TaskManager:
                 remaining_output = state['budgets']['output'] - state['output']
                 try:
                     if kind == 'save_skill':
-                        status, detail = self._verify(row, state, workspace)
+                        status, detail = self._verify(row, state, workspace, gate=True)
                         if status != 'completed':
                             raise ToolError('Verify task artifacts before saving learned skills: ' + detail)
                     if kind == 'read_file':
@@ -521,6 +547,7 @@ class TaskManager:
                         output, output_size = '', 0
                     failed = True
                 if failed:
+                    state['any_failure'] = True
                     state['failure_count'] = state['failure_count'] + 1 if signature == state['failure_signature'] else 1
                     state['failure_signature'] = signature
                 else:

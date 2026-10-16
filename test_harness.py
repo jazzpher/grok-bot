@@ -99,9 +99,41 @@ class HarnessTests(unittest.TestCase):
     def test_completion_requires_explicit_supported_checks(self):
         m = self.manager()
         tid = m.submit('alice', 'Make it beautiful', [], lambda _: action('done', text='beautiful'))
-        self.assertEqual(self.wait(m, tid)['status'], 'needs_input')
+        row = self.wait(m, tid)
+        self.assertEqual(row['status'], 'completed')
+        self.assertIn('not independently verified', [e['text'] for e in m.events(tid, 'alice') if e['type'] == 'verification'][0])
         with self.assertRaises(ValueError):
             m.submit('bob', 'anything', [], lambda _: '', checks=[{'type': 'semantic', 'text': 'beautiful'}])
+
+
+    def test_done_with_unverified_artifact_bounces_once_then_completes(self):
+        m = self.manager()
+        replies = iter([action('write_file', path='out.txt', content='hello'),
+                        action('read_file', path='out.txt'),
+                        action('done', text='wrote it'),
+                        action('done', text='verified: out.txt says hello')])
+        tid = m.submit('alice', 'Write hello to out.txt', [], lambda _: next(replies))
+        row = self.wait(m, tid)
+        self.assertEqual(row['status'], 'completed')
+        texts = [e['text'] for e in m.events(tid, 'alice') if e['type'] == 'check']
+        self.assertTrue(any('Verify your own output' in t for t in texts), texts)
+        verif = [e['text'] for e in m.events(tid, 'alice') if e['type'] == 'verification']
+        self.assertTrue(any('self-verification round' in t for t in verif), verif)
+        self.assertEqual(row['state'].get('self_verify'), 1)
+
+    def test_done_without_self_verification_is_returned_not_prompted(self):
+        m = self.manager()
+        replies = iter([action('write_file', path='out.txt', content='hello'),
+                        action('done', text='wrote it'),
+                        action('read_file', path='out.txt'),
+                        action('done', text='wrote it again'),
+                        action('done', text='verified: out.txt says hello')])
+        tid = m.submit('alice', 'Write hello to out.txt', [], lambda _: next(replies))
+        row = self.wait(m, tid)
+        self.assertEqual(row['status'], 'completed')
+        statuses = [e['type'] for e in m.events(tid, 'alice')]
+        self.assertIn('check', statuses)
+        self.assertNotIn('needs_input', statuses)
 
     def test_exact_copy_check_cannot_target_uploads_case_variant(self):
         m = self.manager()
