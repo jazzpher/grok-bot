@@ -1,6 +1,7 @@
 """Bounded text extraction. No macros, scripts, archive unpacking or OCR."""
 import io
 import pathlib
+import re
 import zipfile
 from pypdf import PdfReader
 from defusedxml import ElementTree
@@ -46,15 +47,49 @@ W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 MAX_DOCX_PARAGRAPHS = 500
 
 
+# Markdown bold, CommonMark-style: the characters hugging the ** must not be spaces, so
+# ASCII art like "| *** FBI OFFICIAL *** |" is left untouched.
+_MD_BOLD = re.compile(r'(?<!\*)\*\*([^*\s](?:[^*]*[^*\s])?)\*\*(?!\*)')
+_MD_HEAD_SIZES = {1: 32, 2: 28, 3: 24, 4: 22}  # half-points: 16/14/12/11 pt
+
+
+def _md_heading(line):
+    """(level, text) for a markdown ATX heading line (1-4 hashes), else None."""
+    level = 0
+    while level < 4 and level < len(line) and line[level] == '#':
+        level += 1
+    if level and level < len(line) and line[level] == ' ':
+        return level, line[level + 1:]
+    return None
+
+
+def _md_runs(line):
+    """[(text, bold)] segments for one line after **bold** extraction."""
+    parts, pos = [], 0
+    for match in _MD_BOLD.finditer(line):
+        if match.start() > pos:
+            parts.append((line[pos:match.start()], False))
+        parts.append((match.group(1), True))
+        pos = match.end()
+    if pos < len(line) or not parts:
+        parts.append((line[pos:], False))
+    return parts
+
+
 def docx_paragraphs(text):
     """Paragraph strings a .docx built from text will contain (blank lines kept)."""
     text = ''.join(ch for ch in text if ch in '\n\r\t' or ord(ch) >= 32)
-    return [line[2:] if line.startswith('# ') else line for line in text.replace('\r\n', '\n').split('\n')]
+    out = []
+    for line in text.replace('\r\n', '\n').split('\n'):
+        heading = _md_heading(line)
+        out.append(heading[1] if heading else _MD_BOLD.sub(r'\1', line))
+    return out
 
 
 def build_docx(text):
     """Deterministic minimal Word document from plain text. Stdlib only, no macros.
-    One paragraph per line; a line starting with '# ' becomes a bold, larger heading."""
+    One paragraph per line. Markdown is rendered lightly: '#'..'####' headings become bold
+    runs of decreasing size, and **text** becomes a bold run. No other markup."""
     from xml.sax.saxutils import escape
     if not isinstance(text, str) or not text.strip():
         raise ValueError('Document text must not be empty.')
@@ -64,10 +99,18 @@ def build_docx(text):
         raise ValueError('Documents are limited to %d lines.' % MAX_DOCX_PARAGRAPHS)
     body = []
     for line in lines:
-        props = ''
-        if line.startswith('# '):
-            line, props = line[2:], '<w:rPr><w:b/><w:sz w:val="32"/></w:rPr>'
-        body.append('<w:p><w:r>%s<w:t xml:space="preserve">%s</w:t></w:r></w:p>' % (props, escape(line)))
+        heading = _md_heading(line)
+        if heading:
+            size = _MD_HEAD_SIZES[heading[0]]
+            body.append('<w:p><w:r><w:rPr><w:b/><w:sz w:val="%d"/></w:rPr>'
+                        '<w:t xml:space="preserve">%s</w:t></w:r></w:p>'
+                        % (size, escape(heading[1])))
+            continue
+        runs = []
+        for chunk, bold in _md_runs(line):
+            props = '<w:rPr><w:b/></w:rPr>' if bold else ''
+            runs.append('<w:r>%s<w:t xml:space="preserve">%s</w:t></w:r>' % (props, escape(chunk)))
+        body.append('<w:p>%s</w:p>' % ''.join(runs))
     document = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                 '<w:document xmlns:w="%s"><w:body>%s</w:body></w:document>' % (W_NS, ''.join(body)))
     parts = [
