@@ -320,6 +320,9 @@ async function send() {
   setRunning(true);
   status.textContent = 'Thinking';
   let bubble = add('grok pending', '');
+  let statusLine = null;
+  if (hasDOM) { statusLine = el('div', 'tstatus running', 'orchestrating…'); chat.appendChild(statusLine); scrollChat(); }
+  const dropStatusLine = () => { if (statusLine && typeof statusLine.remove === 'function') statusLine.remove(); statusLine = null; };
   let current = '';            // text in the active bubble
   let anyText = false, reasoningBox = null, pendingRender = false;
   const paint = () => { if (pendingRender) return; pendingRender = true; raf(() => { pendingRender = false; renderMarkdown(bubble, current); scrollChat(); }); };
@@ -339,6 +342,7 @@ async function send() {
         case 'memory_saved': note('Memory saved: ' + ev.text, 'mem'); refreshMemoryCount(); break;
         case 'schedule_created': note('Scheduled: ' + ev.title + ' · ' + ev.when, 'mem'); refreshScheduleCount(); break;
         case 'text':
+          dropStatusLine();
           if (current && lastChild() !== bubble) { finalizeBubble(); bubble = add('grok pending', ''); current = ''; }
           current += ev.delta; anyText = true; paint(); status.textContent = 'Replying'; break;
         case 'reasoning':
@@ -369,6 +373,7 @@ async function send() {
   } catch (e) {
     note('Error: ' + e.message, 'err'); status.textContent = 'Error';
   } finally {
+    dropStatusLine();
     bubble.className = 'msg grok';
     setRunning(false); if (inp.focus) inp.focus(); loadConversations();
   }
@@ -474,6 +479,75 @@ function showFileChips(view) {
   }
   scrollChat();
 }
+function taskViewInit(view, bubble) {
+  if (view.state) return view.state;
+  if (typeof bubble.appendChild !== 'function') return null;
+  view.state = {raw: [], lastCard: null, lastMeta: null, status: null, rawEl: null, rawDet: null, btns: []};
+  bubble.textContent = '';
+  bubble.className = 'msg grok';
+  return view.state;
+}
+function taskStatusLine(st, bubble, text, cls) {
+  if (!st) return;
+  if (!st.status) { st.status = el('div', 'tstatus ' + (cls || 'running'), ''); bubble.appendChild(st.status); }
+  else st.status.className = 'tstatus ' + (cls || '');
+  st.status.textContent = text;
+}
+function finishTaskStatus(st, bubble, status) {
+  const labels = {completed: 'completed', needs_input: 'needs your input', blocked: 'paused', interrupted: 'interrupted', stopped: 'stopped', failed: 'failed'};
+  taskStatusLine(st, bubble, labels[status] || status, status === 'completed' ? 'done' : '');
+}
+function appendRawLog(view, bubble) {
+  const st = view.state; if (!st || !st.raw.length || st.rawDet) return;
+  const det = el('details', 'rawlog');
+  det.appendChild(el('summary', '', 'raw log'));
+  st.rawEl = el('pre', '', st.raw.join('\n'));
+  det.appendChild(st.rawEl);
+  st.rawDet = det;
+  bubble.appendChild(det);
+}
+function taskEvent(view, bubble, e) {
+  if (e.seq <= view.after) return;
+  view.after = e.seq; noteFile(view, e);
+  if (e.type === 'progress') return;
+  const st = taskViewInit(view, bubble);
+  if (!st) { bubble.textContent += '[' + e.type + '] ' + e.text + '\n'; return; }
+  st.raw.push('[' + e.type + '] ' + e.text);
+  if (st.rawEl) st.rawEl.textContent = st.raw.join('\n');
+  const text = e.text || '';
+  switch (e.type) {
+    case 'status': taskStatusLine(st, bubble, text === 'Running' ? 'orchestrating…' : text); break;
+    case 'plan': if (text) bubble.appendChild(el('div', 'tplan', text.length > 220 ? text.slice(0, 220) + '…' : text)); break;
+    case 'action': {
+      st.lastCard = null; st.lastMeta = null;
+      const m = text.match(/Executing (\S+)/);
+      const card = el('details', 'toolcard running');
+      const sum = el('summary');
+      sum.appendChild(el('span', 'tuse', 'used'));
+      sum.appendChild(el('b', '', m ? m[1] : (text.slice(0, 40) || 'tool')));
+      const meta = el('span', 'tmeta', 'running');
+      sum.appendChild(meta);
+      card.appendChild(sum);
+      st.lastCard = card; st.lastMeta = meta;
+      bubble.appendChild(card);
+      break;
+    }
+    case 'tool': {
+      const card = st.lastCard;
+      if (!card) { bubble.appendChild(el('div', 'tplan', text.length > 220 ? text.slice(0, 220) + '…' : text)); break; }
+      const failed = text.startsWith('Tool failed');
+      card.className = 'toolcard ' + (failed ? 'err' : 'ok');
+      if (st.lastMeta) st.lastMeta.textContent = failed ? 'failed' : 'done';
+      card.appendChild(el('pre', 'tout', text.length > 4000 ? text.slice(0, 4000) + '…' : text));
+      st.lastCard = null; st.lastMeta = null;
+      break;
+    }
+    case 'error': bubble.appendChild(el('div', 'terr', text.slice(0, 300))); break;
+    case 'verification': taskStatusLine(st, bubble, 'verifying result…'); break;
+    case 'needs_input': taskStatusLine(st, bubble, 'waiting for you'); break;
+    default: break;
+  }
+}
 function collapseLog(bubble) {
   if (!bubble.classList) return;
   bubble.classList.add('done');
@@ -491,31 +565,34 @@ async function watchTask(id, bubble) {
   if (watching.has(id)) return;
   const view = taskBubble(id, bubble); bubble = view.bubble;
   watching.add(id);
-  let after = view.after; let retryText = '';
+  if (view.state) {
+    if (view.state.rawDet && typeof view.state.rawDet.remove === 'function') { view.state.rawDet.remove(); view.state.rawDet = null; view.state.rawEl = null; }
+    for (const b of view.state.btns || []) if (b && typeof b.remove === 'function') b.remove();
+    view.state.btns = [];
+  }
+  let retryText = '';
   try {
     for (;;) {
-      const er = await fetch('/tasks/' + id + '/events?after=' + after);
+      const er = await fetch('/tasks/' + id + '/events?after=' + view.after);
       if (!er.ok) throw new Error('Could not load task events');
       const events = await er.json();
-      for (const e of events) { if (e.seq <= after) continue; after = view.after = e.seq; noteFile(view, e); if (e.type === 'retry') retryText = e.text; else if (e.type !== 'progress') retryText = ''; if (e.type !== 'progress') bubble.textContent += '[' + e.type + '] ' + e.text + '\n'; }
+      for (const e of events) { if (e.type === 'retry') retryText = e.text; else if (e.type !== 'progress') retryText = ''; taskEvent(view, bubble, e); }
       const sr = await fetch('/tasks/' + id); if (!sr.ok) throw new Error('Could not load task status');
       const row = await sr.json();
       document.getElementById('status').textContent = (row.status === 'running' && retryText) ? retryText : row.status + ' · step ' + row.steps + (row.attempts === undefined ? '' : ' · provider attempts ' + row.attempts + '/' + row.budgets.steps);
       taskStatuses.set(id, row.status); updateStopButton();
       if (!['queued', 'running'].includes(row.status)) {
         for (;;) {
-          const finalRes = await fetch('/tasks/' + id + '/events?after=' + after);
+          const finalRes = await fetch('/tasks/' + id + '/events?after=' + view.after);
           if (!finalRes.ok) throw new Error('Could not load final task events');
           const finalEvents = await finalRes.json();
-          for (const e of finalEvents) {
-            if (e.seq <= after) continue;
-            after = view.after = e.seq; noteFile(view, e);
-            if (e.type !== 'progress') bubble.textContent += '[' + e.type + '] ' + e.text + '\n';
-          }
+          for (const e of finalEvents) taskEvent(view, bubble, e);
           if (finalEvents.length < 200) break;
         }
-        collapseLog(bubble); showFileChips(view);
-        if (['blocked', 'interrupted', 'stopped'].includes(row.status)) addResumeButton(id, bubble);
+        if (view.state) { finishTaskStatus(view.state, bubble, row.status); appendRawLog(view, bubble); }
+        else collapseLog(bubble);
+        showFileChips(view);
+        if (['blocked', 'interrupted', 'stopped', 'needs_input'].includes(row.status)) addResumeButton(id, bubble, view);
         break;
       }
       await new Promise(resolve => setTimeout(resolve, 500));
@@ -544,8 +621,13 @@ async function restoreTasks(watch = true) {
     }
   } catch (e) { document.getElementById('status').textContent = e.message; }
 }
-function addResumeButton(id, bubble) {
+function addResumeButton(id, bubble, view) {
   const btn = document.createElement('button'); btn.className = 'resume-btn'; btn.textContent = 'Resume task';
+  if (typeof btn.addEventListener !== 'function') return;
+  if (view && view.state) {
+    for (const old of view.state.btns) if (old && typeof old.remove === 'function') old.remove();
+    view.state.btns = [btn];
+  }
   btn.addEventListener('click', async ev => { ev.stopPropagation(); btn.disabled = true; btn.textContent = 'Resuming...'; const ok = await resumeTask(id); if (!ok) { btn.disabled = false; btn.textContent = 'Resume task'; } });
   bubble.appendChild(btn);
 }
@@ -1096,7 +1178,7 @@ async function reloadMcp() {
 }
 
 function boot() {
-  try { applyTheme(localStorage.getItem('grokbot-theme') || ''); } catch (_) { /* ignore */ }
+  try { applyTheme(localStorage.getItem('grokbot-theme') || 'dark'); } catch (_) { /* ignore */ }
   const mic = document.getElementById('mic'); if (mic && (window.SpeechRecognition || window.webkitSpeechRecognition)) mic.hidden = false;
   restoreTasks();
   const initial = document.body && document.body.dataset ? document.body.dataset.cid : '';
