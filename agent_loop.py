@@ -318,6 +318,7 @@ class Workspace:
         result = ('Wrote ' + rel + ' as a real Word document. Verified: opens as DOCX and extracted '
                   'text matches tool input. User requirements/content quality are unverified. Offered as a download.')
         try:
+            import documents
             png, reason = documents.render_doc_preview(path)
         except Exception:
             png, reason = None, 'unexpected error'

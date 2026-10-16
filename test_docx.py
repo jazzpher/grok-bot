@@ -192,6 +192,18 @@ class PreviewTests(unittest.TestCase):
         self.assertIsNone(reason)
         self.assertTrue(png.startswith(b'\x89PNG'))
 
+
+    def test_write_docx_saves_preview(self):
+        if not (shutil.which('soffice') and shutil.which('pdftoppm')):
+            self.skipTest('LibreOffice or pdftoppm not installed')
+        root = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        ws = Workspace(root)
+        result = ws.write_docx('letter.docx', '# Office\nDear Mr. X,\nThis is **important**.\nBody line.')
+        self.assertIn('Screenshot preview saved as letter.preview.png', result)
+        self.assertTrue((pathlib.Path(root) / 'letter.preview.png').read_bytes().startswith(b'\x89PNG'))
+
+
     def test_render_doc_preview_missing_tools(self):
         """A missing soffice/pdftoppm or a broken input returns a reason, never raises."""
         png, reason = render_doc_preview(self.path)  # file does not exist
