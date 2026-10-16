@@ -498,7 +498,7 @@ function argRow(name, arg) {
   sum.appendChild(iconSvg());
   sum.appendChild(el('span', 'averb', def[0]));
   if (arg) {
-    if (def[1] === 'url') {
+    if (def[1] === 'url' && /^https?:\/\//i.test(arg)) {
       const a = document.createElement('a');
       a.className = 'alink'; a.href = arg; a.target = '_blank'; a.rel = 'noopener';
       a.textContent = arg.length > 72 ? arg.slice(0, 72) + '\u2026' : arg;
