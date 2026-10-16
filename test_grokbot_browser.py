@@ -210,5 +210,25 @@ class WorkspaceBrowserTests(unittest.TestCase):
         self.assertEqual(fake.calls[-1], ('close',))
 
 
+class WorkerThreadTests(unittest.TestCase):
+    def test_close_then_reuse_gets_a_fresh_worker_thread(self):
+        import threading
+        seen = []
+
+        class Session(browser_tools.BrowserSession):
+            @browser_tools._on_worker
+            def probe(self):
+                seen.append(threading.current_thread().name)
+                return 'ok'
+
+        s = Session()
+        self.assertEqual(s.probe(), 'ok')
+        self.assertNotEqual(seen[0], threading.current_thread().name)
+        s.close()
+        self.assertIsNone(s._worker)
+        self.assertEqual(s.probe(), 'ok')
+        s.close()
+
+
 if __name__ == '__main__':
     unittest.main()
