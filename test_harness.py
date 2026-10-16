@@ -90,6 +90,7 @@ class HarnessTests(unittest.TestCase):
         s = row['state']; s['pending'] = {'action': 'write_file', 'path': 'x', 'content': 'secret'}
         m.save(tid, 'interrupted', s, {'type': 'test', 'text': 'crash'})
         calls = []
+        self.wait_worker_gone(m, tid)
         self.assertTrue(m.resume(tid, 'alice', lambda _: calls.append(1)))
         self.assertEqual(self.wait(m, tid)['status'], 'blocked')
         self.assertEqual(calls, [])
