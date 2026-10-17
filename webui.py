@@ -74,10 +74,18 @@ KEY_PREFIXES = (('AIza', 'gemini'), ('AQ.', 'gemini'), ('nvapi-', 'nvidia'),
 # Custom https endpoints validated at save time. Memory-only, guarded by provider_lock.
 custom_endpoints = set()
 
-# The UI lives in templates/index.html + static/app.js + static/app.css (see grokbot package).
+# The UI lives in grokbot/templates/ + grokbot/static/ so it ships inside the installed package.
+_HERE = Path(__file__).resolve().parent
 
-app = Flask(__name__, template_folder=str(Path(__file__).resolve().parent / 'templates'),
-            static_folder=str(Path(__file__).resolve().parent / 'static'))
+def _web_dir(name):
+    # Repo layout: <root>/grokbot/<name>; installed wheel: site-packages/grokbot/<name>.
+    # Fall back to a legacy root-level folder for old checkouts.
+    for base in (_HERE / 'grokbot' / name, _HERE / name):
+        if base.is_dir():
+            return str(base)
+    return str(_HERE / 'grokbot' / name)
+
+app = Flask(__name__, template_folder=_web_dir('templates'), static_folder=_web_dir('static'))
 app.secret_key = os.environ.get('GROK_SESSION_SECRET') or secrets.token_hex(32)
 app.config.update(MAX_CONTENT_LENGTH=MAX_UPLOAD + 65536, SESSION_COOKIE_HTTPONLY=True,
                   # Strict by default. 'None' (+GROK_SECURE_COOKIE=1) only when deliberately embedding the UI in an iframe.
