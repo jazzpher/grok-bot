@@ -9,6 +9,9 @@
 - **Token estimates are approximate** (~3.6 chars/token). Compaction triggers at 70% of the configured window; if
   the provider's real window is smaller than configured, you can still get a context-length error — lower the
   window in Settings (it is auto-filled when the model list exposes it).
+- **The Docker sandbox has a read-only root.** Only the workspace mount and a 256 MB `/tmp` are writable, so
+  `pip install` / `apt-get install` inside the sandbox fail; use a venv in the workspace. The image is pulled only
+  when missing (`--pull missing`), so a cold cache needs network access on the host.
 - **JSON tool protocol fallback is weaker** than native tool calling: one tool call per step, and models sometimes
   wrap JSON in prose. It is only used when the provider rejects `tools`.
 - **Web search without a key** scrapes DuckDuckGo HTML, which is best-effort and may break; set `TAVILY_API_KEY`,

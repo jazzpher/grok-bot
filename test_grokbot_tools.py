@@ -1,5 +1,6 @@
 """Offline tests for the grokbot tool registry, file/shell tools, sandbox heuristics, netguard and compaction."""
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -151,6 +152,36 @@ class RegistryTests(unittest.TestCase):
             res = self.run_tool('run_command', command='sleep 20', timeout=2)
             self.assertIn('timed out', res.output.lower())
             self.assertLess(time.monotonic() - started, 15, 'in-container timeout must fire before the host grace period')
+
+    def test_docker_run_args_are_hardened(self):
+        """The container must be read-only-rooted with writable scratch space only.
+
+        Pure argv test: no daemon needed, so it also runs where Docker is absent.
+        """
+        backend = sandbox.DockerBackend(image='python:3.12-slim')
+        args = backend._run_args('grokbot-test', '/tmp/ws:/workspace:rw', False, 30, 'ls')
+        self.assertEqual(args[:3], ['docker', 'run', '--rm'])
+        for flag in ('--init', '--read-only', '--cap-drop', 'no-new-privileges'):
+            self.assertIn(flag, args, flag)
+        self.assertEqual(args[args.index('--pull') + 1], 'missing')
+        self.assertEqual(args[args.index('--network') + 1], 'none')
+        tmpfs = [a for a in args if a.startswith('/tmp:')]
+        self.assertTrue(tmpfs, 'a writable /tmp tmpfs is required when the root is read-only')
+        self.assertIn('mode=1777', tmpfs[0])
+        self.assertIn('HOME=/tmp', args)
+        self.assertIn('TMPDIR=/tmp', args)
+        self.assertIn('-v', args)
+        self.assertIn('/tmp/ws:/workspace:rw', args)
+        if os.name == 'posix':
+            self.assertIn('--user', args)
+        # No host environment is forwarded wholesale.
+        self.assertFalse(any(a.startswith(('PATH=', 'API_KEY=', 'TOKEN=')) for a in args))
+
+    def test_docker_run_args_follow_network_and_read_only_mount(self):
+        backend = sandbox.DockerBackend()
+        args = backend._run_args('n', '/ws:/workspace:ro', True, 5, 'pwd')
+        self.assertEqual(args[args.index('--network') + 1], 'bridge')
+        self.assertIn('/ws:/workspace:ro', args)
 
     def test_tool_output_is_bounded(self):
         text, truncated = bound_output('x' * (gconfig.MAX_TOOL_OUTPUT_CHARS + 500))

@@ -254,13 +254,26 @@ class DockerBackend:
     def available(self):
         return shutil.which('docker') is not None
 
-    def run(self, command, cwd, timeout, network=False, read_only=False):
-        name = 'grokbot-' + str(int(time.time() * 1000)) + '-' + str(os.getpid())
-        mount = str(pathlib.Path(cwd).resolve()) + ':/workspace' + (':ro' if read_only else ':rw')
-        args = ['docker', 'run', '--rm', '--name', name, '--network', 'bridge' if network else 'none',
+    def _run_args(self, name, mount, network, timeout, command):
+        """Build the `docker run` argv (pure, so tests can assert the hardening flags).
+
+        The root filesystem is read-only: only the workspace mount and a small tmpfs
+        at /tmp (HOME and TMPDIR point there) can be written. Installing packages into
+        the image therefore fails by design; install into the workspace instead
+        (`python -m venv .venv && .venv/bin/pip install ...`).
+        """
+        args = ['docker', 'run', '--rm', '--init', '--name', name,
+                '--network', 'bridge' if network else 'none',
+                # Reuse a cached image; never pull silently in the middle of a turn.
+                '--pull', 'missing',
                 '--memory', config.SANDBOX_MEMORY, '--cpus', config.SANDBOX_CPUS, '--pids-limit', '256',
-                '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '-v', mount, '-w', '/workspace',
-                '-e', 'HOME=/workspace', '-e', 'TERM=dumb', '-e', 'NO_COLOR=1', '-e', 'CI=1', '-e', 'PYTHONDONTWRITEBYTECODE=1']
+                '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+                '--read-only',
+                # Writable scratch space; 1777 so it works under --user <host uid>.
+                '--tmpfs', '/tmp:rw,nosuid,size=256m,mode=1777',
+                '-v', mount, '-w', '/workspace',
+                '-e', 'HOME=/tmp', '-e', 'TMPDIR=/tmp', '-e', 'TERM=dumb', '-e', 'NO_COLOR=1', '-e', 'CI=1',
+                '-e', 'PYTHONDONTWRITEBYTECODE=1']
         if os.name == 'posix':
             args += ['--user', '%d:%d' % (os.getuid(), os.getgid())]
         # The command's own budget is enforced inside the container with coreutils/busybox `timeout` (SIGKILL,
@@ -268,6 +281,12 @@ class DockerBackend:
         wrapper = ('if command -v timeout >/dev/null 2>&1; then exec timeout -s KILL "$0" sh -c "$1"; '
                    'else exec sh -c "$1"; fi')
         args += [self.image, 'sh', '-c', wrapper, str(int(timeout)), command]
+        return args
+
+    def run(self, command, cwd, timeout, network=False, read_only=False):
+        name = 'grokbot-' + str(int(time.time() * 1000)) + '-' + str(os.getpid())
+        mount = str(pathlib.Path(cwd).resolve()) + ':/workspace' + (':ro' if read_only else ':rw')
+        args = self._run_args(name, mount, network, timeout, command)
         started = time.monotonic()
         timed_out = False
         try:

@@ -16,8 +16,12 @@ new 0.9 surfaces (memory, automations, MCP, Telegram, plugins, images) add.
   formatting or raw device writes, fork bombs, drive wipes (`format`, `del /s`, `rd /s`, `Remove-Item -Recurse` on a
   drive root), `diskpart`/`bcdedit`, download-piped-to-shell. A small pattern list, not a complete safety net.
 - **Docker backend** (`GROK_SANDBOX_BACKEND=docker`): commands run in a throwaway container with the workspace
-  bind-mounted, no network unless the policy says so, read-only root. The subprocess backend is *not* an isolation
-  boundary — see LIMITATIONS.
+  bind-mounted, no network unless the policy says so, a **read-only root filesystem** and a single writable tmpfs at
+  `/tmp` (which is also `HOME`/`TMPDIR`, 256 MB, `nosuid`). `--cap-drop ALL`, `no-new-privileges`, `--pids-limit`,
+  memory/CPU caps, `--init`, and the image is only pulled when missing. Because the root is read-only, installing
+  packages into the image fails by design: create a venv inside the workspace instead
+  (`python -m venv .venv && .venv/bin/pip install …`). The subprocess backend is *not* an isolation boundary —
+  see LIMITATIONS.
 - **Network guard** for `fetch_url` / web search / custom provider URLs: public hosts only, DNS re-checked, redirects
   bounded, response sizes capped.
 - **Keys** are kept in memory (or env), scrubbed from command environments, never forwarded to a different endpoint
