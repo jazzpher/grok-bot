@@ -363,3 +363,21 @@ class UploadTests(WebTests):
         self.assertEqual(self.upload('scan.pdf',buf.getvalue()).status_code,400)
 
 if __name__=='__main__': unittest.main()
+
+
+class ScreenshotErrorNameTest(unittest.TestCase):
+    """Regression: _save_shot must raise BrowserError (not NameError) when the
+    screenshot bytes are missing or not a PNG, so the model sees the real cause."""
+
+    def test_bad_shot_reports_browsererror_not_nameerror(self):
+
+        class FakeBrowser:
+            def shot(self):
+                return b'not-a-png'
+
+        from agent_loop import Workspace
+        ws = Workspace(Path(tempfile.mkdtemp()))
+        ws.browser = FakeBrowser()
+        note = ws._save_shot('browse_open')
+        self.assertIn('Screenshot unavailable', note)
+        self.assertNotIn('NameError', note)
