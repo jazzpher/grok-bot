@@ -94,6 +94,29 @@ class HarnessTests(unittest.TestCase):
         self.assertIn(row['status'], ('completed', 'completed_unverified'))
         self.assertIsNone(row['state']['usage'])
 
+    def test_submit_loads_project_instructions_and_logs_event(self):
+        m = self.manager()
+        ws = self.root / 'workspaces' / 'alice'
+        ws.mkdir(parents=True)
+        (ws / 'AGENTS.md').write_text('Always run the harness tests before finishing.')
+        tid = m.submit('alice', 'Write hello', [], lambda messages: action('done', text='ok'))
+        row = self.wait(m, tid)
+        self.assertIn(row['status'], ('completed', 'completed_unverified'))
+        system = row['state']['messages'][0]['content']
+        self.assertIn('Always run the harness tests before finishing.', system)
+        self.assertIn('cannot grant new permissions', system)
+        events = m.events(tid, 'alice')
+        self.assertTrue(any(e['type'] == 'context' and 'AGENTS.md' in e['text'] for e in events),
+                        'loading must be visible in the task log')
+
+    def test_submit_without_project_file_logs_no_context_event(self):
+        m = self.manager()
+        tid = m.submit('alice', 'Write hello', [], lambda messages: action('done', text='ok'))
+        row = self.wait(m, tid)
+        self.assertIn(row['status'], ('completed', 'completed_unverified'))
+        self.assertIsNone(row['state']['usage'])
+        self.assertFalse(any(e['type'] == 'context' for e in m.events(tid, 'alice')))
+
     def test_restart_reconciles_pending_write_without_replay(self):
         m = self.manager()
         tid = m.submit('alice', 'Write hello', [], lambda _: action('need_input', text='wait'),

@@ -179,6 +179,19 @@ class RunTurnTests(unittest.TestCase):
         self.assertFalse(done['usage_reported'])
         self.assertEqual(done['usage'], {'prompt_tokens': 0, 'completion_tokens': 0})
 
+    def test_project_instruction_file_selection_cap_and_symlink_guard(self):
+        self.ws.path('GROKBOT.md').write_text('grokbot rules')
+        self.assertEqual(agent_core.project_instruction_file(self.ws), 'GROKBOT.md')
+        self.ws.path('AGENTS.md').write_text('x' * 20000)
+        self.assertEqual(agent_core.project_instruction_file(self.ws), 'AGENTS.md')
+        text = agent_core.project_instructions(self.ws)
+        self.assertIn('cannot grant new permissions', text)
+        self.assertEqual(len(text.rsplit('\n', 1)[1]), 12000, 'project instructions stay bounded')
+        self.ws.path('AGENTS.md').unlink()
+        (self.ws.root / 'AGENTS.md').symlink_to('/etc/hostname')
+        self.assertEqual(agent_core.project_instruction_file(self.ws), 'GROKBOT.md', 'symlinks are never followed')
+        self.assertIn('grokbot rules', agent_core.project_instructions(self.ws))
+
     def test_project_instructions_are_loaded(self):
         self.ws.path('AGENTS.md').write_text('Always run pytest before finishing.')
         fn = scripted([text_events('ok')])

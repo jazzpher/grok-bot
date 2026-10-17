@@ -554,6 +554,7 @@ function taskEvent(view, bubble, e) {
   switch (e.type) {
     case 'status': taskStatusLine(st, bubble, text === 'Running' ? '' : text); break;
     case 'plan': if (text) bubble.appendChild(el('div', 'tplan', text.length > 220 ? text.slice(0, 220) + '…' : text)); break;
+    case 'context': if (text) bubble.appendChild(el('div', 'tplan', text)); break;
     case 'action': {
       st.lastCard = null; st.lastMeta = null;
       const m = text.match(/Executing (\S+)/);

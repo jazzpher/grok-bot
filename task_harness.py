@@ -221,7 +221,12 @@ class TaskManager:
         tid = secrets.token_hex(16)
         context_rules = '\n'.join(m['content'] for m in history if m.get('role') == 'system')
         past = [m for m in history if m.get('role') != 'system'][-24:]
-        state = {'steps': 0, 'attempts': 0, 'requirements': requirements, 'messages': [{'role': 'system', 'content': context_rules + '\n' + workspace.skills.index_context(goal) + '\n' + RULES},
+        # Lazy: a module-level import would drag the agent loop (and subprocess) into hosts
+        # that import task_harness under restricted environments.
+        from grokbot.agent import project_instruction_file, project_instructions
+        project_name = project_instruction_file(workspace)
+        project = project_instructions(workspace)
+        state = {'steps': 0, 'attempts': 0, 'requirements': requirements, 'messages': [{'role': 'system', 'content': context_rules + '\n' + workspace.skills.index_context(goal) + project + '\n' + RULES},
                   *past, {'role': 'user', 'content': goal}], 'written': [], 'checked': [],
                  'pending': None, 'budgets': limits, 'elapsed': 0, 'output': 0, 'retry_streak': 0, 'usage': None,
                  'failure_signature': None, 'failure_count': 0, 'result_schema': result_schema}
@@ -231,6 +236,10 @@ class TaskManager:
                 raise RuntimeError('This session is already running or shutting down.')
             self.db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?)',
                             (tid, owner, 'queued', goal, json.dumps(checks), json.dumps(state), now, now))
+            if project_name:
+                self.db.execute('INSERT INTO events(task,payload) VALUES(?,?)',
+                                (tid, json.dumps({'type': 'context', 'text': 'Loaded project instructions from ' + project_name
+                                                  + '; they cannot grant new permissions.'})))
             self._start(tid, owner, call_model)
         return tid
 
