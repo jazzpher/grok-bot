@@ -259,7 +259,11 @@ class DockerBackend:
         mount = str(pathlib.Path(cwd).resolve()) + ':/workspace' + (':ro' if read_only else ':rw')
         args = ['docker', 'run', '--rm', '--name', name, '--network', 'bridge' if network else 'none',
                 '--memory', config.SANDBOX_MEMORY, '--cpus', config.SANDBOX_CPUS, '--pids-limit', '256',
-                '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '-v', mount, '-w', '/workspace',
+                '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+                # Read-only root filesystem (as docs/SECURITY.md promises); /tmp stays
+                # available as a bounded, noexec tmpfs; only the workspace mount is writable.
+                '--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=256m',
+                '-v', mount, '-w', '/workspace',
                 '-e', 'HOME=/workspace', '-e', 'TERM=dumb', '-e', 'NO_COLOR=1', '-e', 'CI=1', '-e', 'PYTHONDONTWRITEBYTECODE=1']
         if os.name == 'posix':
             args += ['--user', '%d:%d' % (os.getuid(), os.getgid())]
