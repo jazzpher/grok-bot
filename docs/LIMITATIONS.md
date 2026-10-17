@@ -6,7 +6,7 @@
 - **Heuristics are heuristics.** Destructive-command detection, read-only whitelist, network/escape detection are
   regex/token based. Obfuscated commands can slip through (which is why the policy defaults to asking in
   read-only mode and why the Docker backend exists).
-- **Token estimates are approximate** (~3.6 chars/token). Compaction triggers at 75% of the configured window; if
+- **Token estimates are approximate** (~3.6 chars/token). Compaction triggers at 70% of the configured window; if
   the provider's real window is smaller than configured, you can still get a context-length error — lower the
   window in Settings (it is auto-filled when the model list exposes it).
 - **JSON tool protocol fallback is weaker** than native tool calling: one tool call per step, and models sometimes
@@ -38,5 +38,5 @@
   vision. Images stay in the stored context of that conversation (compaction drops them like any old message).
 - **Voice is browser-side only.** Dictation uses the Web Speech API when the browser offers it (Chrome/Edge/Safari);
   there is no server-side STT/TTS.
-- **No Discord/Slack/WhatsApp gateways, no browser automation, no image generation** yet; the gateway runner
+- **No Discord/Slack/WhatsApp gateways or image generation** yet; the gateway runner
   interface (`run_owner_turn`) is platform-agnostic, so adding one is a thin adapter like `grokbot/gateway/telegram.py`.
