@@ -235,6 +235,7 @@ def cmd_chat(args):
 def cmd_serve(args):
     import webui
     webui.app.config.update(MOCK=args.mock, MODEL=args.model or webui.DEFAULT_MODEL)
+    webui.print_startup_info()
     if args.key:
         webui.app.config['API_KEY'] = args.key
     webui.scheduler().start()

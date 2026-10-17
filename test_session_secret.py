@@ -51,5 +51,41 @@ class SessionSecretTests(unittest.TestCase):
             self.assertIn('sessions are ephemeral', out.stdout)
 
 
+@unittest.skipIf(os.name == 'nt', 'XDG default is POSIX-only')
+class DefaultDataDirTests(unittest.TestCase):
+    def test_default_dir_is_per_user_not_the_working_directory(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as elsewhere:
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ('GROK_WORKSPACE_DIR', 'GROK_SESSION_SECRET')}
+            env['XDG_DATA_HOME'] = data
+            env['HOME'] = data          # keep the generated secret out of the real home
+            env['PYTHONPATH'] = str(REPO) + (os.pathsep + env['PYTHONPATH'] if env.get('PYTHONPATH') else '')
+            out = subprocess.run([sys.executable, '-c', 'import webui; print(webui.WORKSPACES)'],
+                                 cwd=elsewhere, env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(Path(out.stdout.strip().splitlines()[-1]), Path(data) / 'grokbot' / 'workspaces')
+            self.assertTrue((Path(data) / 'grokbot' / '.session_secret').is_file())
+            # Starting from another directory must not scatter data next to it.
+            self.assertEqual(list(Path(elsewhere).iterdir()), [])
+
+    def test_concurrent_boots_share_one_secret(self):
+        """O_CREAT|O_EXCL: parallel workers converge on one secret instead of racing."""
+        with tempfile.TemporaryDirectory() as d:
+            env = dict(os.environ)
+            env.pop('GROK_SESSION_SECRET', None)
+            env['GROK_WORKSPACE_DIR'] = str(Path(d) / 'workspaces')
+            code = 'import webui; print(webui.app.secret_key)'
+            procs = [subprocess.Popen([sys.executable, '-c', code], cwd=REPO, env=env,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                     for _ in range(6)]
+            keys = set()
+            for proc in procs:
+                out, err = proc.communicate(timeout=120)
+                self.assertEqual(proc.returncode, 0, err)
+                keys.add(out.strip().splitlines()[-1])
+            self.assertEqual(len(keys), 1, keys)
+            self.assertEqual(len(keys.pop()), 64)
+
+
 if __name__ == '__main__':
     unittest.main()
