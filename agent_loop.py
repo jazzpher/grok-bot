@@ -8,6 +8,7 @@ import re
 import os
 import tempfile
 from skills import SkillStore
+from browser_tools import BrowserError
 from grokbot import config as _cfg
 
 
@@ -264,7 +265,7 @@ class Workspace:
         raise ToolError('Unsupported action. No shell or network tools are available.')
 
     def _browse(self, action):
-        from browser_tools import BrowserSession, BrowserError
+        from browser_tools import BrowserSession
         if not _cfg.BROWSER_ENABLED:
             raise ToolError('Browser tools are off. Set GROK_BROWSER_ENABLED=on to allow browse_open/browse_read.')
         if action.get('action') in ('browse_click', 'browse_type') and not _cfg.BROWSER_INTERACT:

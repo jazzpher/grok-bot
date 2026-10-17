@@ -86,7 +86,6 @@ def _web_dir(name):
     return str(_HERE / 'grokbot' / name)
 
 app = Flask(__name__, template_folder=_web_dir('templates'), static_folder=_web_dir('static'))
-app.secret_key = os.environ.get('GROK_SESSION_SECRET') or secrets.token_hex(32)
 app.config.update(MAX_CONTENT_LENGTH=MAX_UPLOAD + 65536, SESSION_COOKIE_HTTPONLY=True,
                   # Strict by default. 'None' (+GROK_SECURE_COOKIE=1) only when deliberately embedding the UI in an iframe.
                   SESSION_COOKIE_SAMESITE=os.environ.get('GROK_COOKIE_SAMESITE', 'Strict'),
@@ -98,6 +97,30 @@ FRAME_ANCESTORS = os.environ.get('GROK_FRAME_ANCESTORS', "'none'")
 # Any tunnel/reverse proxy must explicitly use exposed mode, even on loopback.
 DEPLOYMENT_MODE = os.environ.get('GROK_DEPLOYMENT_MODE', 'local')
 WORKSPACES = Path(os.environ.get('GROK_WORKSPACE_DIR', 'workspaces')).resolve()
+
+def _session_secret():
+    # Flask signs the session cookie (which carries the workspace/conversation owner id)
+    # with this key. A fresh random key every boot makes every existing conversation,
+    # workspace and task look gone after a restart, so persist the generated key.
+    env = os.environ.get('GROK_SESSION_SECRET', '').strip()
+    if env:
+        return env
+    path = WORKSPACES.parent / '.session_secret'
+    try:
+        if path.is_file():
+            saved = path.read_text().strip()
+            if saved:
+                return saved
+        secret = secrets.token_hex(32)
+        path.write_text(secret)
+        os.chmod(path, 0o600)
+        print('grokbot: generated a session secret at %s so sessions survive restarts' % path)
+        return secret
+    except OSError:
+        print('grokbot: WARNING sessions are ephemeral; set GROK_SESSION_SECRET to keep them across restarts')
+        return secrets.token_hex(32)
+
+app.secret_key = _session_secret()
 TASKS = None
 tasks_lock = threading.Lock()
 
