@@ -16,7 +16,7 @@ new 0.9 surfaces (memory, automations, MCP, Telegram, plugins, images) add.
   formatting or raw device writes, fork bombs, drive wipes (`format`, `del /s`, `rd /s`, `Remove-Item -Recurse` on a
   drive root), `diskpart`/`bcdedit`, download-piped-to-shell. A small pattern list, not a complete safety net.
 - **Docker backend** (`GROK_SANDBOX_BACKEND=docker`): commands run in a throwaway container with the workspace
-  bind-mounted, no network unless the policy says so, read-only root. The subprocess backend is *not* an isolation
+  bind-mounted (the only writable path besides a bounded, noexec tmpfs /tmp), no network unless the policy says so, read-only root (--read-only). The subprocess backend is *not* an isolation
   boundary — see LIMITATIONS.
 - **Network guard** for `fetch_url` / web search / custom provider URLs: public hosts only, DNS re-checked, redirects
   bounded, response sizes capped.
