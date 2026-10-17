@@ -183,6 +183,28 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(args[args.index('--network') + 1], 'bridge')
         self.assertIn('/ws:/workspace:ro', args)
 
+    def test_tests_read_only_blocks_test_edits_only_when_enabled(self):
+        """Benchmark integrity: a run must not be able to 'fix' a failing test by editing it."""
+        cases = [
+            ('write_file', {'path': 'test_inventory.py', 'content': 'pass'}),
+            ('edit_file', {'path': 'tests/test_api.py', 'old_text': 'a', 'new_text': 'b'}),
+            ('delete_file', {'path': 'conftest.py'}),
+            ('copy_file', {'source_path': 'notes.txt', 'path': 'test_copy.py'}),
+        ]
+        with mock.patch.object(gconfig, 'TESTS_READ_ONLY', True):
+            for name, args in cases:
+                res = self.run_tool(name, **args)
+                self.assertFalse(res.ok, name)
+                self.assertIn('GROK_TESTS_READ_ONLY', res.output, name)
+            # Normal source files are still editable.
+            res = self.run_tool('write_file', path='inventory.py', content='x = 1')
+            self.assertIn('Wrote inventory.py', res.output)
+            self.assertEqual(self.ws.path('inventory.py').read_text(), 'x = 1')
+        # Default (off): editing tests is allowed.
+        with mock.patch.object(gconfig, 'TESTS_READ_ONLY', False):
+            res = self.run_tool('write_file', path='test_default.py', content='pass')
+            self.assertIn('Wrote test_default.py', res.output)
+
     def test_tool_output_is_bounded(self):
         text, truncated = bound_output('x' * (gconfig.MAX_TOOL_OUTPUT_CHARS + 500))
         self.assertTrue(truncated)

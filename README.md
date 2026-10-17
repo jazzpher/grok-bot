@@ -91,6 +91,10 @@ task** still uses the original restart-safe harness with explicit artifact check
 retention and deployment limits. Completion there requires explicit supported
 artifact checks; a budget stop is never success.
 
+For evaluation or benchmark runs, set `GROK_TESTS_READ_ONLY=1`: the file tools then refuse to modify
+test paths, so the agent cannot make a failing test pass by editing the test itself (shell commands are
+not covered — use a read-only Docker mount for that).
+
 Settings has a provider picker: choose a trusted OpenAI-compatible provider
 (Google Gemini, NVIDIA NIM, OpenRouter, Groq, Cerebras, Mistral, DeepSeek, xAI
 Grok), paste your key and, if needed, a model name. The endpoint comes from a

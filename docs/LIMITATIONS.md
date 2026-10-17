@@ -13,7 +13,15 @@
   `pip install` / `apt-get install` inside the sandbox fail; use a venv in the workspace. The image is pulled only
   when missing (`--pull missing`), so a cold cache needs network access on the host.
 - **JSON tool protocol fallback is weaker** than native tool calling: one tool call per step, and models sometimes
-  wrap JSON in prose. It is only used when the provider rejects `tools`.
+  wrap JSON in prose. It is only used when the provider rejects `tools`. A reply that *looks* like a tool call but
+  is not usable (wrong schema, truncated/unbalanced JSON) is no longer accepted as a final answer: the model gets
+  up to two corrective nudges naming the exact parse error, and the turn ends with an error (non-zero exit for
+  `grokbot exec`) if it keeps failing. A JSON object closer than ~80 characters to the end of a reply is treated as
+  a call, so avoid quoting the protocol right at the end of an answer.
+- **`GROK_TESTS_READ_ONLY=1` is a file-tool guard, not a sandbox.** It refuses `write_file`/`edit_file`/`copy_file`/
+  `write_docx`/`delete_file` on test paths (`test_*.py`, `tests/**`, `conftest.py`, …) so an evaluation run cannot
+  make a failing test pass by rewriting the test. `run_command` can still modify those files; for a hard guarantee
+  run the task in the Docker backend with the workspace mounted read-only (`read_only` mount).
 - **Web search without a key** scrapes DuckDuckGo HTML, which is best-effort and may break; set `TAVILY_API_KEY`,
   `BRAVE_API_KEY`, or `GROK_SEARXNG_URL` for reliable results.
 - **Durable background tasks still use the legacy JSON harness** (`/task`), not the new agent loop. They are

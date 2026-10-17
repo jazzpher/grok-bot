@@ -65,6 +65,10 @@ DEFAULT_SANDBOX_MODE = _choice('GROK_SANDBOX_MODE', 'workspace-write', ('read-on
 DEFAULT_APPROVAL = _choice('GROK_APPROVAL', 'on-request', ('on-request', 'never'))
 APPROVAL_TIMEOUT = _int('GROK_APPROVAL_TIMEOUT', 600, 10)
 
+# Optional integrity guard for benchmark/eval runs: with this on, the file tools refuse to modify
+# test files, so a run cannot "fix" a failing test by rewriting the test itself.
+TESTS_READ_ONLY = _choice('GROK_TESTS_READ_ONLY', 'off', ('on', 'off')) == 'on'
+
 # Web tools
 SEARCH_BACKEND = _choice('GROK_SEARCH_BACKEND', 'auto', ('auto', 'tavily', 'brave', 'searxng', 'duckduckgo', 'off'))
 TAVILY_API_KEY = os.environ.get('TAVILY_API_KEY', '')

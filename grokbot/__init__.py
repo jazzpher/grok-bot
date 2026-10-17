@@ -4,4 +4,4 @@ The legacy modules (``agent_loop``, ``task_harness``, ``webui``) keep working an
 progressively delegate to this package. New capabilities live here.
 """
 
-__version__ = '0.9.1'
+__version__ = '0.9.2'

@@ -68,6 +68,36 @@ def _read_text(ctx, path):
     return raw.decode('utf-8', errors='replace')
 
 
+TEST_NAME_GLOBS = ('test_*.py', 'test_*.cjs', 'test_*.js', 'test_*.ts', '*_test.py', '*_test.go',
+                   'conftest.py', 'pytest.ini', 'tox.ini')
+
+
+def is_test_path(rel):
+    """True for a path that looks like a test file or lives in a tests/ directory."""
+    rel = str(rel).replace('\\', '/').lstrip('./')
+    parts = rel.split('/')
+    name = parts[-1]
+    if any(fnmatch.fnmatch(name.lower(), pattern) for pattern in TEST_NAME_GLOBS):
+        return True
+    return any(part.lower() in ('test', 'tests', '__tests__', 'spec', 'specs') for part in parts[:-1])
+
+
+def _tests_guard(ctx, path):
+    """Refuse to edit tests when GROK_TESTS_READ_ONLY=1 (benchmark integrity).
+
+    Live runs showed a small model "fixing" a failing test by editing the test's
+    ``except KeyError`` clause instead of the buggy code. This is opt-in because adding
+    or updating tests is normal work; it covers the file tools, not shell writes.
+    """
+    if not config.TESTS_READ_ONLY:
+        return
+    rel = _rel(ctx, _ws(ctx).path(path))
+    if is_test_path(rel):
+        raise ToolError('Refusing to modify %s: GROK_TESTS_READ_ONLY=1 protects test files, so a run cannot '
+                        'make a failing test pass by changing the test. Fix the code instead (or unset the '
+                        'variable if editing tests is really the task).' % rel)
+
+
 def _mutation_approval(ctx, arguments):
     policy = ctx.policy
     if policy is not None and policy.mode == 'read-only':
@@ -119,6 +149,7 @@ def register(registry):
                     'required': ['path', 'content']}, category='files', mutates=True, needs_approval=_mutation_approval)
     @_guard
     def write_file(ctx, path, content):
+        _tests_guard(ctx, path)
         _ws(ctx).execute({'action': 'write_file', 'path': path, 'content': content})
         rel = _rel(ctx, _ws(ctx).path(path))
         return _write_result(ctx, rel, content)
@@ -131,6 +162,7 @@ def register(registry):
                     'required': ['path', 'old_text', 'new_text']}, category='files', mutates=True, needs_approval=_mutation_approval)
     @_guard
     def edit_file(ctx, path, old_text, new_text, replace_all=False):
+        _tests_guard(ctx, path)
         p = _ws(ctx).path(path)
         if not p.is_file():
             raise ToolError('No such file: ' + path + '. Use write_file to create it.')
@@ -269,6 +301,7 @@ def register(registry):
                     'required': ['source_path', 'path']}, category='files', mutates=True, needs_approval=_mutation_approval)
     @_guard
     def copy_file(ctx, source_path, path):
+        _tests_guard(ctx, path)
         return _ws(ctx).execute({'action': 'copy_file', 'source_path': source_path, 'path': path})
 
     @registry.tool('compare_files', 'Compare two workspace files byte-for-byte. Only MATCH means identical.',
@@ -283,6 +316,7 @@ def register(registry):
                     'required': ['path', 'content']}, category='files', mutates=True, needs_approval=_mutation_approval)
     @_guard
     def write_docx(ctx, path, content):
+        _tests_guard(ctx, path)
         return _ws(ctx).execute({'action': 'write_docx', 'path': path, 'content': content})
 
     @registry.tool('delete_file', 'Delete a workspace file (not uploads).',
@@ -291,6 +325,7 @@ def register(registry):
                    needs_approval=lambda ctx, a: _mutation_approval(ctx, a) or 'Deleting a file is irreversible.')
     @_guard
     def delete_file(ctx, path):
+        _tests_guard(ctx, path)
         p = _ws(ctx).path(path)
         rel = _rel(ctx, p)
         if is_upload_path(rel):

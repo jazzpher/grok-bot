@@ -102,6 +102,91 @@ class RunTurnTests(unittest.TestCase):
         # the JSON tool call text never reaches the user as a text delta
         self.assertFalse(any(e['type'] == 'text' and '"tool"' in e['delta'] for e in self.events))
 
+    def json_turn(self, script, **kw):
+        fn = scripted(script)
+        result = agent_core.run_turn([{'role': 'user', 'content': 'go'}], self.registry, self.ctx(), self.cfg,
+                                     self.events.append, stream_fn=fn, tool_mode='json', **kw)
+        return result, fn
+
+    def test_malformed_json_tool_call_is_nudged_not_accepted_as_final(self):
+        """Regression: a wrong-schema call used to end the turn as 'completed' with nothing done.
+
+        Reproduced live (inventory tasks, free model): exit 0, no tool ran, the broken JSON was
+        shown as the answer.
+        """
+        bad = text_events('{"action": "write_file", "path": "out.txt", "content": "hi"}')
+        good = text_events('{"tool": "write_file", "arguments": {"path": "out.txt", "content": "hi"}}')
+        result, fn = self.json_turn([bad, good, text_events('Done.')])
+        self.assertEqual(result.status, 'completed')
+        self.assertEqual(self.ws.path('out.txt').read_text(), 'hi')
+        self.assertEqual(result.text, 'Done.')
+        # The broken call was never shown to the user as an answer.
+        self.assertFalse(any(e['type'] == 'text' and e['delta'].startswith('{"action"') for e in self.events))
+        # The model was told exactly what was wrong, in a system nudge.
+        nudge = [m for m in fn.calls[1]['messages'] if m['role'] == 'user' and 'could not be used' in (m.get('content') or '')]
+        self.assertEqual(len(nudge), 1)
+        self.assertIn('"tool"', nudge[0]['content'])
+        self.assertTrue(any(e['type'] == 'status' and 'could not be parsed' in e['text'] for e in self.events))
+
+    def test_unbalanced_json_tool_call_is_nudged(self):
+        bad = text_events('{"tool": "write_file", "arguments": {"path": "b.txt", "content": "x"')
+        good = text_events('{"tool": "write_file", "arguments": {"path": "b.txt", "content": "x"}}')
+        result, _ = self.json_turn([bad, good, text_events('ok')])
+        self.assertEqual(result.status, 'completed')
+        self.assertEqual(self.ws.path('b.txt').read_text(), 'x')
+
+    def test_malformed_call_twice_fails_the_turn_instead_of_pretending_success(self):
+        bad = text_events('{"action": "run_command", "command": "ls"}')
+        result, fn = self.json_turn([bad], max_steps=6)
+        self.assertEqual(result.status, 'error')
+        self.assertGreaterEqual(len(fn.calls), 3, 'it retries with a corrective nudge before giving up')
+        self.assertTrue(any(e['type'] == 'error' and 'unparsable tool call' in e['text'] for e in self.events))
+        self.assertFalse(self.ws.path('out.txt').exists())
+
+    def test_plain_prose_answer_is_still_a_final_answer(self):
+        result, fn = self.json_turn([text_events('All set: 3 files, no tool call needed.')])
+        self.assertEqual(result.status, 'completed')
+        self.assertEqual(len(fn.calls), 1)
+        self.assertEqual(result.text, 'All set: 3 files, no tool call needed.')
+
+    def test_prose_that_mentions_the_protocol_is_not_executed(self):
+        # Long trailing prose: the object is not at the tail, so it is documentation, not a call.
+        text = ('To call a tool, the shape is {"tool": "read_file", "arguments": {"path": "a"}} '
+                'but a call itself has to be the very last thing in the reply, after any plan or notes, '
+                'with nothing else following it except whitespace.')
+        result, fn = self.json_turn([text_events(text)])
+        self.assertEqual(result.status, 'completed')
+        self.assertEqual(len(fn.calls), 1)
+        self.assertEqual(result.text, text)
+
+    def test_provider_400_includes_the_scrubbed_reason(self):
+        import requests
+        from task_harness import friendly_provider_error
+
+        class FakeResponse:
+            status_code = 400
+            url = 'https://api.example.test/v1/chat/completions'
+
+            def json(self):
+                return {'error': {'message': 'Invalid model: gemini-flash-latest (key AIzaSECRET123456)'}}
+
+        exc = requests.HTTPError('400 Client Error', response=FakeResponse())
+        text = friendly_provider_error(exc)
+        self.assertIn('HTTP 400', text)
+        self.assertIn('Invalid model', text)
+        self.assertNotIn('AIzaSECRET123456', text)
+        self.assertIn('<redacted-key>', text)
+
+        class Opaque:
+            status_code = 400
+            url = 'https://api.example.test/v1/chat/completions'
+            text = ''
+
+            def json(self):
+                raise ValueError('no body')
+        self.assertEqual(friendly_provider_error(requests.HTTPError('400', response=Opaque())),
+                         'The provider rejected the request (HTTP 400). Check the model name in Settings.')
+
     def test_step_budget_and_stop_event(self):
         fn = scripted([tool_call_events('current_time', {})])
         result = self.turn(fn, max_steps=3)
