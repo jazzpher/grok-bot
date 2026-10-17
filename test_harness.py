@@ -63,6 +63,37 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(row['state']['steps'], first_steps + 3)
         self.assertFalse(m.resume(tid, 'alice', lambda _: action('done', text='ok')))
 
+    def test_worker_accumulates_reported_provider_usage(self):
+        m = self.manager()
+        replies = iter([action('write_file', path='out.txt', content='hello'),
+                        action('read_file', path='out.txt'), action('done', text='ok')])
+        def provider(messages, limit=None):
+            provider.last_usage = {'prompt_tokens': 100, 'completion_tokens': 10}
+            return next(replies)
+        tid = m.submit('alice', 'Write hello', [], provider,
+                       checks=[{'type': 'file_text', 'path': 'out.txt', 'text': 'hello'}])
+        row = self.wait(m, tid)
+        self.assertEqual(row['status'], 'completed')
+        self.assertEqual(row['state']['usage'], {'prompt_tokens': 300, 'completion_tokens': 30})
+
+    def test_worker_usage_stays_unknown_when_provider_is_silent(self):
+        m = self.manager()
+        tid = m.submit('alice', 'Write hello', [], lambda messages: action('done', text='ok'))
+        row = self.wait(m, tid)
+        self.assertIn(row['status'], ('completed', 'completed_unverified'))
+        self.assertIsNone(row['state']['usage'])
+
+    def test_worker_usage_rejects_malformed_values(self):
+        m = self.manager()
+        replies = iter([action('done', text='ok')])
+        def provider(messages):
+            provider.last_usage = {'prompt_tokens': 'lots', 'completion_tokens': True}
+            return next(replies)
+        tid = m.submit('alice', 'Write hello', [], provider)
+        row = self.wait(m, tid)
+        self.assertIn(row['status'], ('completed', 'completed_unverified'))
+        self.assertIsNone(row['state']['usage'])
+
     def test_restart_reconciles_pending_write_without_replay(self):
         m = self.manager()
         tid = m.submit('alice', 'Write hello', [], lambda _: action('need_input', text='wait'),
