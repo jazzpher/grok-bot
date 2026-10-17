@@ -263,6 +263,7 @@ def run_turn(messages: List[dict], registry: ToolRegistry, ctx: ToolContext, cfg
         emit(send_info)
     json_mode = tool_mode == 'json' or ctx.extras.get('json_mode') is True
     usage_total = {'prompt_tokens': 0, 'completion_tokens': 0}
+    usage_reported = False
     steps = tool_count = 0
     retries = 0
     summary = previous_summary
@@ -303,6 +304,7 @@ def run_turn(messages: List[dict], registry: ToolRegistry, ctx: ToolContext, cfg
                     elif kind == 'tool_calls':
                         calls = event['calls']
                     elif kind == 'usage':
+                        usage_reported = True
                         for key in ('prompt_tokens', 'completion_tokens'):
                             if isinstance(event.get(key), int):
                                 usage_total[key] += event[key]
@@ -387,7 +389,7 @@ def run_turn(messages: List[dict], registry: ToolRegistry, ctx: ToolContext, cfg
         plugins.run_turn_end(ctx, result)
     except Exception:  # noqa: BLE001
         pass
-    send({'type': 'done', 'status': status, 'steps': steps, 'tool_calls': tool_count, 'usage': usage_total})
+    send({'type': 'done', 'status': status, 'steps': steps, 'tool_calls': tool_count, 'usage': usage_total, 'usage_reported': usage_reported})
     return result
 
 
