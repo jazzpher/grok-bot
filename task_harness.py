@@ -50,8 +50,43 @@ def provider_name(url):
     return 'The AI provider'
 
 
+def _provider_detail(response, limit=180):
+    """Short, scrubbed reason from a provider error body (or '').
+
+    A bare "HTTP 400" hides the actual cause ("invalid model", "tools not supported",
+    "max_tokens too large"), which is exactly what a user needs to fix it. Keys, bearer
+    tokens and URLs are stripped before the text is shown.
+    """
+    if response is None:
+        return ''
+    detail = ''
+    try:
+        data = response.json()
+    except Exception:  # noqa: BLE001 - not JSON, fall back to text
+        data = None
+    if isinstance(data, dict):
+        err = data.get('error')
+        if isinstance(err, dict):
+            detail = str(err.get('message') or err.get('code') or '')
+        elif isinstance(err, str):
+            detail = err
+        elif isinstance(data.get('message'), str):
+            detail = data['message']
+    if not detail:
+        try:
+            detail = response.text or ''
+        except Exception:  # noqa: BLE001
+            return ''
+    detail = ' '.join(str(detail).split())
+    detail = re.sub(r'\b(sk-|AIza|nvapi-|gsk_|xai-)[A-Za-z0-9_\-]{4,}', '<redacted-key>', detail)
+    detail = re.sub(r'(?i)\bbearer\s+\S+', 'Bearer <redacted>', detail)
+    detail = re.sub(r'(?i)\b(api[_-]?key|key|token|authorization)\b\s*[:=]\s*\S+', r'\1 <redacted>', detail)
+    detail = re.sub(r'https?://\S+', '<url>', detail)
+    return detail[:limit].strip()
+
+
 def friendly_provider_error(exc_or_code, url=None, retrying=False):
-    """Plain-language provider error text. Never includes keys, URLs or raw bodies."""
+    """Plain-language provider error text. Never includes keys or URLs."""
     response = getattr(exc_or_code, 'response', None)
     code = getattr(response, 'status_code', None) if not isinstance(exc_or_code, int) else exc_or_code
     url = url or getattr(response, 'url', '') or ''
@@ -70,7 +105,11 @@ def friendly_provider_error(exc_or_code, url=None, retrying=False):
     if code == 429:
         return 'Free quota reached. Wait a bit, then try again.'
     if code == 400:
-        return 'The provider rejected the request (HTTP 400). Check the model name in Settings.'
+        detail = _provider_detail(response)
+        base = 'The provider rejected the request (HTTP 400)'
+        if detail:
+            return base + ': ' + detail.rstrip('.') + '. Check the model name and settings.'
+        return base + '. Check the model name in Settings.'
     return 'Provider error' + (' (HTTP %s)' % code if code else '') + '. Check key, model and quota.'
 
 

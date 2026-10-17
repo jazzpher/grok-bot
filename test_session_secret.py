@@ -58,7 +58,9 @@ class DefaultDataDirTests(unittest.TestCase):
             env = {k: v for k, v in os.environ.items()
                    if k not in ('GROK_WORKSPACE_DIR', 'GROK_SESSION_SECRET')}
             env['XDG_DATA_HOME'] = data
-            env['HOME'] = data          # keep the generated secret out of the real home
+            # No HOME override: it would also move the user site-packages (deps installed with
+            # --user become invisible) and break the subprocess on machines without a venv.
+            # XDG_DATA_HOME alone keeps the secret and the workspaces inside `data`.
             env['PYTHONPATH'] = str(REPO) + (os.pathsep + env['PYTHONPATH'] if env.get('PYTHONPATH') else '')
             out = subprocess.run([sys.executable, '-c', 'import webui; print(webui.WORKSPACES)'],
                                  cwd=elsewhere, env=env, capture_output=True, text=True, timeout=60)

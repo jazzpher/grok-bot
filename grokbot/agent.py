@@ -221,6 +221,64 @@ def parse_json_tool_call(text):
     return None
 
 
+_TOOL_KEY = re.compile(r'"(tool|action|tool_call|function)"\s*:')
+MAX_JSON_NUDGES = 2
+
+
+def _unclosed_json_start(text):
+    """Index of the outermost '{' that is never closed (string/escape aware), else None."""
+    stack, in_str, esc = [], False, False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == '\\':
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == '{':
+            stack.append(i)
+        elif ch == '}' and stack:
+            stack.pop()
+    return stack[0] if stack else None   # outermost: a truncated call starts at the first '{'
+
+
+def unparsed_tool_call_reason(text):
+    """Why a tool-call-shaped reply could not be used, or None when it is a normal answer.
+
+    ``parse_json_tool_call`` returning None means "not a tool call" for both a plain prose
+    answer and a broken call. Without this distinction a wrong-schema or truncated call ends
+    the turn as a success with nothing done, which is how a live run exited 0 while its file
+    was never written.
+    """
+    if not isinstance(text, str):
+        return None
+    stripped = text.strip()
+    if not stripped:
+        return None
+    candidates = []
+    spans = _balanced_json_objects(stripped)
+    if spans:
+        start, end = spans[-1]
+        if len(stripped) - end <= 80:          # same tail rule as parse_json_tool_call
+            candidates.append(stripped[start:end])
+    unclosed = _unclosed_json_start(stripped)
+    if unclosed is not None and len(stripped) - unclosed <= 4000:
+        candidates.append(stripped[unclosed:])
+    for candidate in candidates:
+        if not _TOOL_KEY.search(candidate):
+            continue
+        try:
+            data = json.loads(candidate)
+        except ValueError as exc:
+            return 'it is not valid JSON (%s)' % getattr(exc, 'msg', 'parse error')
+        if isinstance(data, dict) and not isinstance(data.get('tool'), str):
+            return 'it has no "tool" field naming the tool to call'
+    return None
+
+
 def _friendly(exc, url=''):
     try:
         from task_harness import friendly_provider_error
@@ -274,6 +332,7 @@ def run_turn(messages: List[dict], registry: ToolRegistry, ctx: ToolContext, cfg
     usage_reported = False
     steps = tool_count = 0
     retries = 0
+    nudges = 0
     summary = previous_summary
     final_text = ''
     status = 'completed'
@@ -359,8 +418,27 @@ def run_turn(messages: List[dict], registry: ToolRegistry, ctx: ToolContext, cfg
                 parsed = parse_json_tool_call(text)
                 if parsed:
                     calls = [{'id': 'call_' + secrets.token_hex(4), 'name': parsed[0], 'arguments': json.dumps(parsed[1])}]
-                elif text:
-                    send({'type': 'text', 'delta': text})
+                else:
+                    reason = unparsed_tool_call_reason(text)
+                    if reason:
+                        nudges += 1
+                        convo.append({'role': 'assistant', 'content': text})
+                        if nudges <= MAX_JSON_NUDGES:
+                            convo.append({'role': 'user', 'content':
+                                          'SYSTEM: your last message looked like a tool call but could not be used because '
+                                          + reason + '. Reply with exactly one JSON object of the form '
+                                          '{"tool": "<tool name>", "arguments": {...}} and nothing else. Do not wrap it in '
+                                          'prose or code fences. If the work is finished, answer in plain text with no JSON.'})
+                            send({'type': 'status', 'text': 'Tool call could not be parsed (%s); asking the model to retry %d of %d…'
+                                  % (reason, nudges, MAX_JSON_NUDGES)})
+                            continue
+                        status = 'error'
+                        final_text = text
+                        send({'type': 'error', 'text': 'The model kept sending an unparsable tool call (%s), so the turn '
+                                                       'stopped instead of reporting success.' % reason})
+                        break
+                    elif text:
+                        send({'type': 'text', 'delta': text})
             if not calls:
                 final_text = text
                 if finish == 'length':
