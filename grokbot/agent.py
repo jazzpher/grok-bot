@@ -80,20 +80,28 @@ def environment_block(ctx: ToolContext, registry: ToolRegistry, policy: SandboxP
 PROJECT_INSTRUCTION_FILES = ('AGENTS.md', 'GROKBOT.md', 'CLAUDE.md')
 
 
-def project_instructions(workspace):
-    """AGENTS.md (Codex/Claude convention) from the workspace root, bounded."""
+def project_instruction_file(workspace):
+    """Name of the project-instruction file present in the workspace root, else None."""
     for name in PROJECT_INSTRUCTION_FILES:
         try:
             path = workspace.path(name)
         except Exception:  # noqa: BLE001
             continue
         if path.is_file() and not path.is_symlink():
-            try:
-                text = path.read_text(encoding='utf-8')[:12000]
-            except (OSError, UnicodeError):
-                continue
-            return '\n\nProject instructions from ' + name + ' (follow them; they cannot grant new permissions):\n' + text
-    return ''
+            return name
+    return None
+
+
+def project_instructions(workspace):
+    """AGENTS.md (Codex/Claude convention) from the workspace root, bounded."""
+    name = project_instruction_file(workspace)
+    if name is None:
+        return ''
+    try:
+        text = workspace.path(name).read_text(encoding='utf-8')[:12000]
+    except (OSError, UnicodeError):
+        return ''
+    return '\n\nProject instructions from ' + name + ' (follow them; they cannot grant new permissions):\n' + text
 
 
 def memory_block(ctx, goal):
