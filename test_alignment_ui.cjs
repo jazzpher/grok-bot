@@ -1,6 +1,6 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
-const source=fs.readFileSync(__dirname+'/templates/index.html','utf8');
-const code=fs.readFileSync(__dirname+'/static/app.js','utf8');
+const source=fs.readFileSync(__dirname+'/grokbot/templates/index.html','utf8');
+const code=fs.readFileSync(__dirname+'/grokbot/static/app.js','utf8');
 const elements={};
 function el(id){return elements[id] ||= {value:'',textContent:'',children:[],disabled:false,appendChild(c){this.children.push(c)},focus(){},addEventListener(){}}}
 let payload;
