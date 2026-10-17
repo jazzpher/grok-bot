@@ -96,7 +96,23 @@ PASSWORD = os.environ.get('GROK_APP_PASSWORD', '')
 FRAME_ANCESTORS = os.environ.get('GROK_FRAME_ANCESTORS', "'none'")
 # Any tunnel/reverse proxy must explicitly use exposed mode, even on loopback.
 DEPLOYMENT_MODE = os.environ.get('GROK_DEPLOYMENT_MODE', 'local')
-WORKSPACES = Path(os.environ.get('GROK_WORKSPACE_DIR', 'workspaces')).resolve()
+def default_data_dir():
+    """Where workspaces, the session secret and the SQLite stores live by default.
+
+    A fixed per-user directory, not the current working directory: starting the app
+    from another folder must not open a different (empty) set of conversations.
+    """
+    env = os.environ.get('GROK_WORKSPACE_DIR', '').strip()
+    if env:
+        return Path(env).expanduser()
+    if os.name == 'nt':
+        base = Path(os.environ.get('LOCALAPPDATA') or Path.home() / 'AppData' / 'Local')
+        return base / 'grokbot' / 'workspaces'
+    base = Path(os.environ.get('XDG_DATA_HOME', '').strip() or Path.home() / '.local' / 'share')
+    return base / 'grokbot' / 'workspaces'
+
+
+WORKSPACES = default_data_dir().resolve()
 
 def _session_secret():
     # Flask signs the session cookie (which carries the workspace/conversation owner id)
@@ -107,13 +123,21 @@ def _session_secret():
         return env
     path = WORKSPACES.parent / '.session_secret'
     try:
-        if path.is_file():
-            saved = path.read_text().strip()
-            if saved:
-                return saved
-        secret = secrets.token_hex(32)
-        path.write_text(secret)
-        os.chmod(path, 0o600)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            # O_CREAT|O_EXCL + mode 0600: the file never exists with looser permissions,
+            # and a concurrent boot (multi-worker) finds the same secret instead of racing.
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            for _ in range(50):   # another process may still be writing the file
+                saved = path.read_text().strip()
+                if saved:
+                    return saved
+                time.sleep(0.02)
+            raise OSError('session secret file stayed empty')
+        with os.fdopen(fd, 'w') as fh:
+            secret = secrets.token_hex(32)
+            fh.write(secret)
         print('grokbot: generated a session secret at %s so sessions survive restarts' % path)
         return secret
     except OSError:
@@ -121,6 +145,14 @@ def _session_secret():
         return secrets.token_hex(32)
 
 app.secret_key = _session_secret()
+
+
+def print_startup_info():
+    """Where data lives and whether sessions survive restarts (both CLIs call this)."""
+    secret_mode = 'env' if os.environ.get('GROK_SESSION_SECRET', '').strip() else (
+        'persisted' if (WORKSPACES.parent / '.session_secret').is_file() else 'ephemeral')
+    print('data dir: %s · sessions: %s' % (WORKSPACES, secret_mode))
+
 TASKS = None
 tasks_lock = threading.Lock()
 
@@ -1654,6 +1686,7 @@ def main():
     if not PASSWORD: print('Local-only access. Set GROK_APP_PASSWORD before sharing a tunnel.')
     if SETTINGS_FILE.exists(): print('Legacy settings.json loaded. Remove it after moving your key to an environment variable; new settings are memory-only.')
     print('grokbot %s · sandbox backend: %s · search: %s' % (grokbot.__version__, sandbox_mod.describe()['backend'], search_backend()))
+    print_startup_info()
     manager = task_manager()
     manager.prune()
     try:

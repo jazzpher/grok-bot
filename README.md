@@ -175,10 +175,11 @@ Click Workspace files to download the result.
 
 The section above describes the durable background harness. The interactive agent
 can additionally run shell commands (under the sandbox policy), fetch pages and
-search the web, and (only when you opt in with `GROK_BROWSER_ENABLED=on`,
-plus `GROK_BROWSER_INTERACT=on` for click/type) drive a local browser.
-It still cannot send messages, buy things, or reach files outside its
-workspace unless you choose `full-access`. Completion of
+search the web. It still cannot send messages, buy things, or reach files outside its
+workspace unless you choose `full-access`. Browser automation (`browse_open`,
+`browse_read`, and `browse_click`/`browse_type` with `GROK_BROWSER_INTERACT=on`) is
+opt-in with `GROK_BROWSER_ENABLED=on` and currently runs in **durable background
+tasks** only, not yet in the interactive composer. Completion of
 background tasks verifies only the explicit supported byte checks, not every
 possible semantic goal. Review generated content.
 

@@ -27,12 +27,12 @@ from pathlib import Path
 
 import requests
 
-from grokbot import config
+from grokbot import __version__, config
 from grokbot.tools import ToolError, ToolSpec
 
 log = logging.getLogger('grokbot.mcp')
 PROTOCOL_VERSION = '2025-06-18'
-CLIENT_INFO = {'name': 'grok-bot', 'version': '0.9.0'}
+CLIENT_INFO = {'name': 'grok-bot', 'version': __version__}
 _NAME_OK = re.compile(r'[^A-Za-z0-9_-]+')
 
 

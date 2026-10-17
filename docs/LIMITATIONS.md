@@ -39,6 +39,10 @@
   formatting; messages longer than 4000 chars are split.
 - **Images are passed through, not processed.** Attachments become `image_url` parts; the provider/model must support
   vision. Images stay in the stored context of that conversation (compaction drops them like any old message).
+- **Browser tools are durable-task only.** `browse_open/read/click/type` are enabled by `GROK_BROWSER_ENABLED=on`
+  (plus `GROK_BROWSER_INTERACT=on` for click/type) and run through the legacy task harness (`/task`). The
+  interactive agent (`POST /agent`) does not expose them yet; Playwright is an optional dependency
+  (`pip install playwright && playwright install chromium`).
 - **Voice is browser-side only.** Dictation uses the Web Speech API when the browser offers it (Chrome/Edge/Safari);
   there is no server-side STT/TTS.
 - **No Discord/Slack/WhatsApp gateways or image generation** yet; the gateway runner
