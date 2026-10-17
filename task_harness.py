@@ -223,7 +223,7 @@ class TaskManager:
         past = [m for m in history if m.get('role') != 'system'][-24:]
         state = {'steps': 0, 'attempts': 0, 'requirements': requirements, 'messages': [{'role': 'system', 'content': context_rules + '\n' + workspace.skills.index_context(goal) + '\n' + RULES},
                   *past, {'role': 'user', 'content': goal}], 'written': [], 'checked': [],
-                 'pending': None, 'budgets': limits, 'elapsed': 0, 'output': 0, 'retry_streak': 0,
+                 'pending': None, 'budgets': limits, 'elapsed': 0, 'output': 0, 'retry_streak': 0, 'usage': None,
                  'failure_signature': None, 'failure_count': 0, 'result_schema': result_schema}
         now = time.time()
         with self.lock, self.db:
@@ -429,6 +429,14 @@ class TaskManager:
                 try:
                     remaining_output = state['budgets']['output'] - state['output']
                     raw = self._call_model(call_model, context, remaining_output)
+                    usage = getattr(call_model, 'last_usage', None)
+                    if isinstance(usage, dict):
+                        prompt, completion = usage.get('prompt_tokens'), usage.get('completion_tokens')
+                        if type(prompt) is int and type(completion) is int:
+                            totals = state.get('usage') or {'prompt_tokens': 0, 'completion_tokens': 0}
+                            totals['prompt_tokens'] += max(0, prompt)
+                            totals['completion_tokens'] += max(0, completion)
+                            state['usage'] = totals
                     if not isinstance(raw, str):
                         raise ValueError('Provider response must be text.')
                     raw_size = len(raw.encode('utf-8'))
