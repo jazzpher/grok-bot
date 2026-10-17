@@ -1,4 +1,5 @@
 """Offline tests for the grokbot tool registry, file/shell tools, sandbox heuristics, netguard and compaction."""
+import subprocess
 import json
 import tempfile
 import threading
@@ -392,3 +393,34 @@ class NoDockerApprovalTests(unittest.TestCase):
                     'pytest tests/test_x.py::t', 'node -e "console.log(1)"'):
             self.assertFalse(sandbox.escapes_workspace(cmd, root), cmd)
         self.assertFalse(sandbox.escapes_workspace('type C:\\Users\\me\\ws\\a.txt', 'C:\\Users\\me\\ws'))
+
+
+class DockerBackendArgsTests(unittest.TestCase):
+    """The docker backend must actually pass the isolation flags SECURITY.md documents."""
+
+    def run_backend_capture_args(self):
+        from grokbot import sandbox
+        backend = sandbox.DockerBackend(image='img:test')
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured['args'] = args
+            return subprocess.CompletedProcess(args, 0, stdout=b'', stderr=b'')
+
+        with mock.patch.object(sandbox.shutil, 'which', return_value='/usr/bin/docker'), \
+             mock.patch.object(sandbox.subprocess, 'run', fake_run):
+            backend.run('true', '/tmp', 5)
+        return captured['args']
+
+    def test_docker_run_uses_read_only_root_and_tmpfs_tmp(self):
+        args = self.run_backend_capture_args()
+        self.assertIn('--read-only', args)
+        i = args.index('--tmpfs')
+        self.assertEqual(args[i + 1], '/tmp:rw,noexec,nosuid,size=256m')
+
+    def test_docker_run_keeps_existing_guards(self):
+        args = self.run_backend_capture_args()
+        for flag in ('--cap-drop', '--security-opt', '--pids-limit', '--memory', '--cpus'):
+            self.assertIn(flag, args)
+        self.assertEqual(args[args.index('--cap-drop') + 1], 'ALL')
+        self.assertEqual(args[args.index('--security-opt') + 1], 'no-new-privileges')
