@@ -14,8 +14,8 @@ agent — including grok-bot itself — editing this repo.
   Telegram) uses to run a turn.
 - `agent_loop.py`, `task_harness.py`, `skills.py`, `documents.py`, `model_discovery.py` — original modules,
   still used (Workspace path guards, durable task worker, skills store, PDF/DOCX extraction, model listing).
-- `templates/index.html`, `static/app.js`, `static/app.css` — the UI. No inline scripts (CSP `script-src 'self'`).
-- Tests: `test_*.py` (unittest, offline — no provider calls) and `test_*.cjs` (Node, exercise `static/app.js`
+- `grokbot/templates/index.html`, `grokbot/static/app.js`, `grokbot/static/app.css` — the UI. No inline scripts (CSP `script-src 'self'`).
+- Tests: `test_*.py` (unittest, offline — no provider calls) and `test_*.cjs` (Node, exercise `grokbot/static/app.js`
   against a fake DOM).
 
 ## Rules

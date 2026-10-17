@@ -1,6 +1,6 @@
 // Execute the shipped inline UI with deterministic DOM/network/timer seams.
 const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
-const code = fs.readFileSync(__dirname + '/static/app.js', 'utf8');
+const code = fs.readFileSync(__dirname + '/grokbot/static/app.js', 'utf8');
 function setup(fetch) {
   const elements = {}, timers = [];
   const el = id => elements[id] ||= {value:'', textContent:'', children:[], disabled:id === 'stop', isConnected:true,

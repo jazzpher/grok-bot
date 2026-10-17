@@ -1,5 +1,5 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
-const code=fs.readFileSync(__dirname+'/static/app.js','utf8');
+const code=fs.readFileSync(__dirname+'/grokbot/static/app.js','utf8');
 function setup(fetch){const elements={};function el(id){return elements[id] ||= {value:'',textContent:'',children:[],disabled:false,isConnected:true,appendChild(c){this.children.push(c);if(id==='taskselect'&&!this.value)this.value=c.value},replaceChildren(){this.children=[]},focus(){},addEventListener(name,fn){this[name]=fn}}}const ctx={console,Set,Map,JSON,Promise,TextDecoder,fetch,setTimeout:f=>f(),document:{getElementById:el,createElement:()=>({textContent:'',isConnected:true,style:{}})}};vm.createContext(ctx);vm.runInContext(code.replace('restoreTasks();','').replace('restoreHistory();','').replace('loadPolicy();','').replace('refreshKeyStatus();\n',''),ctx);return {ctx,el}}
 const response=obj=>({ok:true,json:async()=>obj});
 (async()=>{

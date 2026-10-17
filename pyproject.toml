@@ -21,9 +21,9 @@ dependencies = [
 grokbot = "grokbot.cli:main"
 
 [tool.setuptools]
-packages = ["grokbot", "grokbot.tools"]
-py-modules = ["webui", "agent_loop", "task_harness", "skills", "documents", "model_discovery", "bot"]
+packages = ["grokbot", "grokbot.tools", "grokbot.gateway"]
+py-modules = ["webui", "agent_loop", "task_harness", "skills", "documents", "model_discovery", "bot", "browser_tools"]
 include-package-data = true
 
 [tool.setuptools.package-data]
-"*" = ["templates/*.html", "static/*.css", "static/*.js", "static/vendor/*"]
+"grokbot" = ["templates/*.html", "static/*.css", "static/*.js", "static/*.svg", "static/*.webmanifest", "static/vendor/*"]
