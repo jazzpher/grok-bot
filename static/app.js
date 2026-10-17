@@ -363,6 +363,8 @@ async function send() {
         case 'done':
           if (ev.status === 'stopped') note('Stopped.');
           if (ev.status === 'max_steps') note('Step budget reached — say "continue" to keep going.');
+          if (ev.usage_reported === false) note('Token counts: not reported by this provider.');
+          else if (ev.usage && (ev.usage.prompt_tokens || ev.usage.completion_tokens)) note('Turn tokens: ' + (ev.usage.prompt_tokens || 0).toLocaleString() + ' in / ' + (ev.usage.completion_tokens || 0).toLocaleString() + ' out.');
           break;
         default: break;
       }
@@ -439,7 +441,8 @@ function updateMeter(ev) {
   if (typeof ev.prompt_tokens === 'number') usageTotals.prompt = ev.total_prompt_tokens || usageTotals.prompt;
   if (typeof ev.completion_tokens === 'number') usageTotals.completion = ev.total_completion_tokens || usageTotals.completion;
   const used = ev.prompt_tokens || ev.estimated_context || 0; const win = ev.context_tokens || 0;
-  m.textContent = (win ? Math.round(100 * used / win) + '% ctx · ' : '') + (used ? used.toLocaleString() + ' in / ' + (ev.completion_tokens || 0).toLocaleString() + ' out' : '');
+  const session = (usageTotals.prompt || usageTotals.completion) ? ' · session ' + usageTotals.prompt.toLocaleString() + ' in / ' + usageTotals.completion.toLocaleString() + ' out' : '';
+  m.textContent = (win ? Math.round(100 * used / win) + '% ctx · ' : '') + (used ? used.toLocaleString() + ' in / ' + (ev.completion_tokens || 0).toLocaleString() + ' out' : '') + session;
 }
 
 /* ---------------- stop / legacy durable tasks ---------------- */
@@ -621,7 +624,13 @@ async function watchTask(id, bubble) {
           if (finalEvents.length < 200) break;
         }
         if (view.state) { finishTaskStatus(view.state, bubble, row.status); appendRawLog(view, bubble); }
-        if (view.state && row.elapsed) { const s = Math.round(row.elapsed); bubble.appendChild(el('div', 'tmetafoot', s >= 60 ? Math.floor(s / 60) + 'm ' + (s % 60) + 's' : s + 's')); }
+        if (view.state) {
+          const foot = [];
+          if (row.elapsed) { const s = Math.round(row.elapsed); foot.push(s >= 60 ? Math.floor(s / 60) + 'm ' + (s % 60) + 's' : s + 's'); }
+          if (row.usage) foot.push('tokens ' + (row.usage.prompt_tokens || 0).toLocaleString() + ' in / ' + (row.usage.completion_tokens || 0).toLocaleString() + ' out');
+          else if ((row.steps || 0) > 0) foot.push('token counts unavailable');
+          if (foot.length) bubble.appendChild(el('div', 'tmetafoot', foot.join(' · '))); else collapseLog(bubble);
+        }
         else collapseLog(bubble);
         showFileChips(view);
         if (['blocked', 'interrupted', 'stopped', 'needs_input'].includes(row.status)) addResumeButton(id, bubble, view);

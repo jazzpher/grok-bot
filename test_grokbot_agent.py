@@ -165,6 +165,20 @@ class RunTurnTests(unittest.TestCase):
         # the last near-end object wins when several are present
         self.assertEqual(agent_core.parse_json_tool_call('{"tool": "a", "arguments": {}} note {"tool": "b", "arguments": {}}'), ('b', {}))
 
+    def test_done_reports_usage_totals_and_availability(self):
+        fn = scripted([text_events('ok')])
+        self.turn(fn)
+        done = [e for e in self.events if e['type'] == 'done'][0]
+        self.assertTrue(done['usage_reported'])
+        self.assertEqual(done['usage'], {'prompt_tokens': 50, 'completion_tokens': 5})
+
+    def test_done_marks_usage_unreported_when_provider_omits_it(self):
+        fn = scripted([[{'type': 'text', 'delta': 'ok'}, {'type': 'finish', 'reason': 'stop'}]])
+        self.turn(fn)
+        done = [e for e in self.events if e['type'] == 'done'][0]
+        self.assertFalse(done['usage_reported'])
+        self.assertEqual(done['usage'], {'prompt_tokens': 0, 'completion_tokens': 0})
+
     def test_project_instruction_file_selection_cap_and_symlink_guard(self):
         self.ws.path('GROKBOT.md').write_text('grokbot rules')
         self.assertEqual(agent_core.project_instruction_file(self.ws), 'GROKBOT.md')

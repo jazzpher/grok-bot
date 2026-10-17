@@ -397,9 +397,15 @@ def task():
 def task_provider(result_schema=None):
     cfg = config_snapshot()
     def call(messages, max_output_bytes):
+        call.last_usage = None
         response_limit = max_output_bytes * 6 + 65536
         with model_reply(messages, cfg, structured=True, response_limit=response_limit, action_schema=result_action_schema(result_schema)) as res:
             response = read_limited_json_response(res, response_limit)
+        usage = response.get('usage')
+        if isinstance(usage, dict):
+            prompt, completion = usage.get('prompt_tokens'), usage.get('completion_tokens')
+            if type(prompt) is int and type(completion) is int and prompt >= 0 and completion >= 0:
+                call.last_usage = {'prompt_tokens': prompt, 'completion_tokens': completion}
         choice = response['choices'][0]
         if choice.get('finish_reason') not in (None, 'stop'):
             raise ValueError('Provider task response was filtered, truncated or incomplete; no action executed.')
@@ -409,6 +415,7 @@ def task_provider(result_schema=None):
         if len(content.encode('utf-8')) > max_output_bytes:
             raise OutputBudgetExceeded('Provider response exceeded output budget.')
         return content
+    call.last_usage = None
     return call
 
 
@@ -447,7 +454,8 @@ def task_status(tid):
             'steps': row['state']['steps'], 'attempts': row['state'].get('attempts', row['state']['steps']), 'budgets': row['state']['budgets'],
             'requirements': row['state'].get('requirements', ''), 'checks': row['checks'], 'result_schema': row['state'].get('result_schema', []),
             'verification_scope': 'Only explicit checks are verified; content quality is not independently verified.',
-            'elapsed': row['state']['elapsed'], 'output': row['state']['output']}
+            'elapsed': row['state']['elapsed'], 'output': row['state']['output'],
+            'usage': row['state'].get('usage')}
 
 
 @app.route('/tasks/<tid>/events')
