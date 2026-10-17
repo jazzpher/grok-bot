@@ -185,6 +185,15 @@ class BrowserSession:
         return self._summary()
 
     @_on_worker
+    def shot(self):
+        page = self._ensure()
+        self._verify_location()
+        try:
+            return page.screenshot(type='png')
+        except Exception as exc:
+            raise BrowserError('Could not capture a screenshot (%s).' % type(exc).__name__) from exc
+
+    @_on_worker
     def text(self):
         self._ensure()
         return self._summary()

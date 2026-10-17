@@ -333,7 +333,8 @@ class TaskManager:
             return 'check', 'Read these written files first: ' + ', '.join(sorted(workspace.written - workspace.checked))
         if not row['checks']:
             # Preview screenshots are verification aids, not user artifacts.
-            docs = sorted(n for n in workspace.written if not n.lower().endswith('.preview.png'))
+            docs = sorted(n for n in workspace.written
+                          if not (n.lower().endswith('.preview.png') or n.lower().endswith('.browse.png')))
             if docs and all(n.lower().endswith('.docx') for n in docs) and not workspace.written - workspace.checked:
                 # Built-in check for Word output: each saved file must reopen as DOCX with text.
                 for n in docs:
@@ -561,6 +562,10 @@ class TaskManager:
                 extra = []
                 if kind in ('write_docx', 'write_file', 'copy_file') and not failed:
                     extra = [{'type': 'file', 'text': workspace.path(a['path']).relative_to(workspace.root).as_posix()}]
+                elif kind in ('browse_open', 'browse_click', 'browse_type'):
+                    emitted = state.get('shots_emitted', 0)
+                    extra = [{'type': 'file', 'text': n} for n in workspace.shots[emitted:]]
+                    state['shots_emitted'] = len(workspace.shots)
                 self.save(tid, 'running', state, {'type': 'tool', 'text': output[:4000], 'step': state['steps']}, extra)
             finish('budget_exhausted', 'Step budget exhausted; not complete.')
         except ToolError as exc:

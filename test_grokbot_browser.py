@@ -1,3 +1,4 @@
+import pathlib
 import sys
 import tempfile
 import unittest
@@ -25,6 +26,10 @@ class FakeBrowser:
 
     def text(self):
         return 'TITLE: t\nURL: u\n\nbody'
+
+    def shot(self):
+        self.calls.append(('shot',))
+        return b'\x89PNG\r\n\x1a\n' + b'fakepngdata'
 
     def close(self):
         self.calls.append(('close',))
@@ -177,7 +182,7 @@ class WorkspaceBrowserTests(unittest.TestCase):
                 with self.assertRaises(ToolError) as ctx:
                     self.ws.execute(act)
                 self.assertIn('GROK_BROWSER_INTERACT', str(ctx.exception))
-        self.assertEqual([c[0] for c in fake.calls], ['open'])
+        self.assertEqual([c[0] for c in fake.calls], ['open', 'shot'])
 
     def test_disabled_browser_is_a_clean_error(self):
         self.ws.browser = FakeBrowser()
@@ -228,6 +233,59 @@ class WorkerThreadTests(unittest.TestCase):
         self.assertIsNone(s._worker)
         self.assertEqual(s.probe(), 'ok')
         s.close()
+
+
+
+
+class ScreenshotEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def open_action(self):
+        return parse_action('{"action":"browse_open","text":"","path":"","source_path":"","content":"","expression":"","url":"https://example.com","selector":""}')
+
+    def click_action(self):
+        return parse_action('{"action":"browse_click","text":"","path":"","source_path":"","content":"","expression":"","url":"","selector":"a"}')
+
+    def test_browse_actions_save_screenshot_evidence(self):
+        import agent_loop
+        ws = Workspace(self.tmp.name)
+        ws.browser = FakeBrowser()
+        with mock.patch.object(agent_loop._cfg, 'BROWSER_ENABLED', True):
+            result = ws.execute(self.open_action())
+        self.assertIn('Screenshot evidence saved as 001-open.browse.png', result)
+        png = pathlib.Path(self.tmp.name) / '001-open.browse.png'
+        self.assertTrue(png.read_bytes().startswith(b'\x89PNG'))
+        self.assertIn('001-open.browse.png', ws.checked)
+        self.assertNotIn('001-open.browse.png', ws.written)
+        with mock.patch.object(agent_loop._cfg, 'BROWSER_ENABLED', True), \
+                mock.patch.object(agent_loop._cfg, 'BROWSER_INTERACT', True):
+            ws.execute(self.click_action())
+        self.assertEqual(ws.shots, ['001-open.browse.png', '002-click.browse.png'])
+
+    def test_failed_screenshot_does_not_fail_the_action(self):
+        import agent_loop
+        ws = Workspace(self.tmp.name)
+        ws.browser = FakeBrowser()
+        ws.browser.shot = lambda: (_ for _ in ()).throw(RuntimeError('nope'))
+        with mock.patch.object(agent_loop._cfg, 'BROWSER_ENABLED', True):
+            result = ws.execute(self.open_action())
+        self.assertIn('TITLE: Example', result)
+        self.assertIn('Screenshot unavailable', result)
+        self.assertEqual(ws.shots, [])
+
+    def test_shot_numbering_continues_across_restarts(self):
+        import agent_loop
+        ws = Workspace(self.tmp.name)
+        ws.browser = FakeBrowser()
+        with mock.patch.object(agent_loop._cfg, 'BROWSER_ENABLED', True):
+            ws.execute(self.open_action())
+        ws2 = Workspace(self.tmp.name)
+        ws2.browser = FakeBrowser()
+        with mock.patch.object(agent_loop._cfg, 'BROWSER_ENABLED', True):
+            ws2.execute(self.open_action())
+        self.assertTrue((pathlib.Path(self.tmp.name) / '002-open.browse.png').is_file())
 
 
 if __name__ == '__main__':
