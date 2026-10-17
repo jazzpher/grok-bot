@@ -18,7 +18,6 @@ import inspect
 from urllib.parse import urlparse
 
 from agent_loop import RULES, ACTION_FIELDS, Workspace, ToolError, is_upload_path, parse_action, INVALID_HELP, MAX_INVALID, build_docx, extract_text
-from grokbot.agent import project_instruction_file, project_instructions
 
 MAX_SCHEMA_REJECTS = 3
 MAX_SELF_VERIFY = 1  # one autonomous self-verification round before done is accepted
@@ -222,6 +221,9 @@ class TaskManager:
         tid = secrets.token_hex(16)
         context_rules = '\n'.join(m['content'] for m in history if m.get('role') == 'system')
         past = [m for m in history if m.get('role') != 'system'][-24:]
+        # Lazy: a module-level import would drag the agent loop (and subprocess) into hosts
+        # that import task_harness under restricted environments.
+        from grokbot.agent import project_instruction_file, project_instructions
         project_name = project_instruction_file(workspace)
         project = project_instructions(workspace)
         state = {'steps': 0, 'attempts': 0, 'requirements': requirements, 'messages': [{'role': 'system', 'content': context_rules + '\n' + workspace.skills.index_context(goal) + project + '\n' + RULES},
