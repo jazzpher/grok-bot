@@ -8,3 +8,6 @@ workspaces/
 build/
 *.egg-info/
 .session_secret
+.coverage
+.coverage.*
+htmlcov/
