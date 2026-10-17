@@ -5,3 +5,5 @@ workspaces/
 *.sqlite3
 *.sqlite3-journal
 *.sqlite3.lock
+build/
+*.egg-info/
