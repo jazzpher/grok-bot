@@ -103,3 +103,13 @@ BROWSER_EXECUTABLE = os.environ.get('GROK_BROWSER_EXECUTABLE', '')
 BROWSER_ARGS = [a for a in os.environ.get('GROK_BROWSER_ARGS', '').split(',') if a]
 BROWSER_TEXT_LIMIT = _int('GROK_BROWSER_TEXT_LIMIT', 12000, 200)
 BROWSER_TIMEOUT = _int('GROK_BROWSER_TIMEOUT', 30, 1)
+
+# Interactive web browsing for the /agent composer (optional Playwright dependency).
+# Separate from GROK_BROWSER_ENABLED (durable /task loop) and GROK_PREVIEW (workspace HTML):
+# this lets the interactive agent open public web pages and SEE them. Off by default.
+AGENT_BROWSER_ENABLED = _choice('GROK_AGENT_BROWSER', 'off', ('on', 'off')) == 'on'
+# Attach screenshots as images for the model (needs a vision-capable model); 'off' keeps the
+# text snapshot only, for text-only models.
+AGENT_BROWSER_IMAGES = _choice('GROK_AGENT_BROWSER_IMAGES', 'on', ('on', 'off')) == 'on'
+# Total browse actions (open/see/scroll/click) allowed per turn.
+AGENT_BROWSER_MAX_ACTIONS = _int('GROK_AGENT_BROWSER_MAX_ACTIONS', 8, 1)
