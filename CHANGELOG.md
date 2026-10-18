@@ -4,10 +4,26 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.2] - 2026-10-17
+
+Hard-test fixes (live runs against a small free model, reproduced offline).
+
+### Fixed
+
+- **A malformed JSON tool call is no longer reported as success.** With the JSON fallback protocol, a reply
+  containing a wrong-schema or truncated call (`{"action": …}`, missing `}`, …) was shown as the final answer and
+  `grokbot exec` exited 0 while nothing had run. The model now gets up to two corrective nudges naming the exact
+  parse error; if it keeps failing, the turn ends with status `error` (exit 1) and an explicit message. Only a
+  real call attempt is treated this way (a `"tool"` key, or `"action"`/`"function"` with `"arguments"`/`"args"`,
+  or a lone `{"action": …}` object that is the whole reply): JSON quoted inside a prose answer or code fence
+  stays a normal answer.
+- **HTTP 400 now says why.** The provider's own error message is included after redaction (API keys, bearer tokens
+  and URLs) instead of a bare "rejected the request".
 
 ### Added
 
+- `GROK_TESTS_READ_ONLY=1`: file tools refuse to modify test paths, so an eval run cannot "fix" a failing test by
+  rewriting it (opt-in; shell writes are not covered — documented in LIMITATIONS).
 - `preview_page` tool (off by default, `GROK_PREVIEW=on`): renders a workspace HTML file in headless Chromium
   and returns the screenshot to the model as an image plus measured layout facts (horizontal overflow, top
   element boxes, best-effort contrast). Loopback-only workspace-confined static server; the page cannot reach
