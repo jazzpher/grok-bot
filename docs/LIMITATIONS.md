@@ -43,6 +43,12 @@
   (plus `GROK_BROWSER_INTERACT=on` for click/type) and run through the legacy task harness (`/task`). The
   interactive agent (`POST /agent`) does not expose them yet; Playwright is an optional dependency
   (`pip install playwright && playwright install chromium`).
+- **Preview is render-only, single page, per turn.** `preview_page` (`GROK_PREVIEW=on`) screenshots workspace
+  HTML for the interactive agent: no clicking/typing/scrolling, one page per call (desktop or mobile viewport),
+  screenshots are clipped at 2000px height and capped at 3 previews per turn, and the image only helps when the
+  configured model actually accepts vision input. The contrast pass is best-effort heuristics, not an
+  accessibility audit. The preview web tab (Phase C) does not exist yet. Preview screenshots are shown live in
+  the tool card but are not kept in the persisted conversation history.
 - **Voice is browser-side only.** Dictation uses the Web Speech API when the browser offers it (Chrome/Edge/Safari);
   there is no server-side STT/TTS.
 - **No Discord/Slack/WhatsApp gateways or image generation** yet; the gateway runner

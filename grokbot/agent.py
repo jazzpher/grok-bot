@@ -41,6 +41,9 @@ How to work
 - Identity: you run on whichever model/provider is configured; do not claim a specific vendor unless certain.
 '''
 
+PREVIEW_RULE = '''UI work rule (preview_page is available):
+After writing or editing HTML/CSS/UI files, call preview_page on the main file. Look at the screenshot. Fix at least the issues you can see. Preview again. Do not say you are done until you have previewed the latest version. Max 3 preview rounds per turn. If something is still off after that, say honestly what you saw and what you could not fix. Never treat read_file on CSS/HTML as seeing the design - text is not pixels.'''
+
 JSON_PROTOCOL = '''
 TOOL PROTOCOL (this provider has no native tool calling):
 To call a tool, reply with ONLY one JSON object and nothing else: {"tool": "<name>", "arguments": {...}}
@@ -150,6 +153,8 @@ def context_info(ctx, registry, goal):
 def build_system_prompt(ctx, registry, policy, goal='', model_label='', extra='', json_mode=False):
     workspace = ctx.workspace
     parts = [SYSTEM_PROMPT, environment_block(ctx, registry, policy, model_label)]
+    if config.PREVIEW_ENABLED and 'preview_page' in registry.names_for(ctx):
+        parts.append(PREVIEW_RULE)
     try:
         skills = workspace.skills.index_context(goal)
     except Exception:  # noqa: BLE001
@@ -386,11 +391,26 @@ def run_turn(messages: List[dict], registry: ToolRegistry, ctx: ToolContext, cfg
                     convo.append({'role': 'user', 'content': body})
                 else:
                     convo.append({'role': 'tool', 'tool_call_id': call['id'], 'name': call['name'], 'content': body})
+                for img in _tool_images(result):
+                    # Vision hand-off: the screenshot goes to the model as a real image part,
+                    # not a filename. Marked so it is scrubbed from stored history at turn end.
+                    send({'type': 'preview_image', 'data_url': img['data_url'], 'name': img.get('name', 'preview'),
+                          'tool': call['name']})
+                    convo.append({'role': 'user', '_preview_image': True, 'content': [
+                        {'type': 'text', 'text': '[Screenshot from ' + call['name']
+                         + ' - look at it and critique the layout before continuing.]'},
+                        {'type': 'image_url', 'image_url': {'url': img['data_url'], 'detail': 'auto'}}]})
             if ctx.stop.is_set():
                 status = 'stopped'
                 break
     finally:
         ctx.emit = original_emit
+        try:
+            from grokbot.tools import preview as _preview_tools
+            _preview_tools.close_turn_session(ctx)      # kill the turn's Chromium + loopback server
+        except Exception:  # noqa: BLE001
+            pass
+    scrub_preview_images(convo)
     result = TurnResult(status, final_text, convo, steps, tool_count, usage_total, summary)
     try:
         from grokbot import plugins
@@ -399,6 +419,31 @@ def run_turn(messages: List[dict], registry: ToolRegistry, ctx: ToolContext, cfg
         pass
     send({'type': 'done', 'status': status, 'steps': steps, 'tool_calls': tool_count, 'usage': usage_total, 'usage_reported': usage_reported})
     return result
+
+
+def _tool_images(result):
+    """Image attachments a tool result carries for the model (bounded, data URLs only)."""
+    meta = result.meta if isinstance(result.meta, dict) else {}
+    images = meta.get('images')
+    if not isinstance(images, list):
+        return []
+    out = []
+    for img in images[:2]:
+        if isinstance(img, dict) and isinstance(img.get('data_url'), str) and img['data_url'].startswith('data:image/'):
+            out.append(img)
+    return out
+
+
+def scrub_preview_images(convo):
+    """Replace this turn's preview screenshots with a text note in the returned history,
+    so stored context does not carry megabytes of base64 into every later request."""
+    for message in convo:
+        if not message.pop('_preview_image', False):
+            continue
+        content = message.get('content')
+        if isinstance(content, list):
+            text = ' '.join(p.get('text', '') for p in content if isinstance(p, dict) and p.get('type') == 'text')
+            message['content'] = (text + ' [screenshot omitted from history]').strip()
 
 
 def _execute_calls(registry, ctx, calls, send):

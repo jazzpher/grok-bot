@@ -183,6 +183,19 @@ tasks** only, not yet in the interactive composer. Completion of
 background tasks verifies only the explicit supported byte checks, not every
 possible semantic goal. Review generated content.
 
+**UI preview** (`preview_page`) lets the interactive agent SEE the HTML it
+writes: opt in with `GROK_PREVIEW=on` (separate from `GROK_BROWSER_ENABLED`;
+needs Playwright + Chromium). The agent renders a workspace HTML file in
+headless Chromium and gets back the screenshot as an image (with a
+vision-capable model; set `GROK_PREVIEW_IMAGES=off` for text-only models to
+keep just the layout numbers) plus measured layout facts: horizontal overflow,
+top element boxes and a best-effort contrast pass. It renders workspace files
+only — never URLs — from a loopback-only server; the page cannot reach the
+internet, the LAN, other local ports or `file://`. Chromium starts on the
+first preview of a turn and is killed when the turn ends; at most 3 previews
+per turn. See `docs/skills/ui-preview-pass/SKILL.md` for the companion
+workflow skill (import it from the Skills panel).
+
 Files are limited per session (defaults: 2000 files, 10 MB per file, 500 MB
 total; configurable with `GROK_MAX_*`). Paths cannot escape the workspace. Existing files in that workspace can be
 replaced by a task. Download important results. New chat clears only your
