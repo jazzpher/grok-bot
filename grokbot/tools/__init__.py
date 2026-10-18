@@ -221,8 +221,17 @@ class ToolRegistry:
             output = spec.handler(ctx, **clean)
             if output is None:
                 output = ''
-            text, truncated = bound_output(output)
-            result = ToolResult(name, clean, text, True, time.monotonic() - started, truncated)
+            if isinstance(output, ToolResult):
+                # Handlers may return a full result to carry meta (e.g. preview images);
+                # the output text is still bounded here.
+                text, truncated = bound_output(output.output)
+                output.output = text
+                output.truncated = output.truncated or truncated
+                output.duration = time.monotonic() - started
+                result = output
+            else:
+                text, truncated = bound_output(output)
+                result = ToolResult(name, clean, text, True, time.monotonic() - started, truncated)
         except ToolError as exc:
             result = ToolResult(name, arguments if isinstance(arguments, dict) else {}, 'Tool error: ' + str(exc), False, time.monotonic() - started)
         except (OSError, UnicodeError, ValueError, TypeError) as exc:
@@ -233,9 +242,9 @@ class ToolRegistry:
 
 def default_registry(plugins_too=True):
     """All built-in tools. Availability of shell/web/memory/scheduler tools is decided per context."""
-    from grokbot.tools import delegate, files, memory, misc, schedule, shell, skills, web
+    from grokbot.tools import delegate, files, memory, misc, preview, schedule, shell, skills, web
     registry = ToolRegistry()
-    for module in (files, misc, skills, shell, web, memory, delegate, schedule):
+    for module in (files, misc, skills, shell, web, memory, delegate, schedule, preview):
         module.register(registry)
     if plugins_too:
         from grokbot import plugins
