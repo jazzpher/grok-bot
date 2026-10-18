@@ -242,9 +242,9 @@ class ToolRegistry:
 
 def default_registry(plugins_too=True):
     """All built-in tools. Availability of shell/web/memory/scheduler tools is decided per context."""
-    from grokbot.tools import delegate, files, memory, misc, preview, schedule, shell, skills, web
+    from grokbot.tools import browse, delegate, files, memory, misc, preview, schedule, shell, skills, web
     registry = ToolRegistry()
-    for module in (files, misc, skills, shell, web, memory, delegate, schedule, preview):
+    for module in (files, misc, skills, shell, web, memory, delegate, schedule, preview, browse):
         module.register(registry)
     if plugins_too:
         from grokbot import plugins
