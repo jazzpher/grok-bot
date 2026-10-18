@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] - 2026-10-18
+
+### Added
+
+- **Interactive web browsing for the /agent composer** (`browse_open` / `browse_see` / `browse_scroll` /
+  `browse_click`, off by default behind `GROK_AGENT_BROWSER=on`; needs Playwright + Chromium). The agent opens
+  public web pages in a headless Chromium and receives each view as a screenshot image (vision models;
+  `GROK_AGENT_BROWSER_IMAGES=off` keeps the text snapshot only) plus a bounded text snapshot with numbered
+  clickable elements. Safety shape: public netguard on every request including redirect hops (no loopback, LAN,
+  private or reserved addresses, no userinfo); the user approves each new domain before it loads (per-domain
+  "always allow" rules; a one-time allow covers that host for the turn); pages that navigate to an unapproved
+  domain are blanked and blocked; no typing exists, the browser context is ephemeral (no cookies, profile or
+  saved logins) and downloads are never accepted; at most `GROK_AGENT_BROWSER_MAX_ACTIONS` (default 8) browse
+  actions per turn; Chromium is killed at turn end. Unattended runs (scheduler) cannot prompt, so domains
+  without a saved rule are denied there.
+
 ## [0.9.2] - 2026-10-17
 
 Hard-test fixes (live runs against a small free model, reproduced offline).
