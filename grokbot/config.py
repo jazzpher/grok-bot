@@ -84,6 +84,12 @@ def resolve_sandbox_backend():
         return 'docker' if docker_available() else 'subprocess'
     return SANDBOX_BACKEND
 
+# Preview tool (optional Playwright dependency; workspace-only, loopback static server)
+PREVIEW_ENABLED = _choice('GROK_PREVIEW', 'off', ('on', 'off')) == 'on'
+# Attach the screenshot as an image for the model (needs a vision-capable model);
+# 'off' keeps the layout numbers only, for text-only models.
+PREVIEW_IMAGES = _choice('GROK_PREVIEW_IMAGES', 'on', ('on', 'off')) == 'on'
+
 # Browser tools (optional Playwright dependency)
 BROWSER_ENABLED = _choice('GROK_BROWSER_ENABLED', 'off', ('on', 'off')) == 'on'
 # click/type can act on pages; the task loop has no approval prompt, so they need their own opt-in.
