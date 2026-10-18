@@ -79,6 +79,21 @@ function toolCard(ev) {
   if (ev.id) toolCards.set(ev.id, card);
   return card;
 }
+function previewImageCard(ev, host) {
+  const box = el('details', 'toolcard preview ok');
+  const sum = el('summary');
+  sum.appendChild(el('b', '', 'preview'));
+  sum.appendChild(el('code', '', (ev.name || 'screenshot').slice(0, 120)));
+  box.appendChild(sum);
+  if (typeof ev.data_url === 'string' && /^data:image\/(png|jpeg|webp|gif);base64,/.test(ev.data_url)) {
+    const img = document.createElement('img');
+    img.src = ev.data_url; img.alt = ev.name || 'preview screenshot'; img.className = 'previewshot';
+    box.appendChild(img);
+  }
+  (host || chat).appendChild(box);
+  scrollChat();
+  return box;
+}
 function finishToolCard(ev) {
   const card = toolCards.get(ev.id);
   if (!card) return;
@@ -185,6 +200,7 @@ function subagentEvent(ev) {
   } else if (ev.type === 'tool_start') {
     host.appendChild(toolCard(ev));
   } else if (ev.type === 'tool_end') finishToolCard(ev);
+  else if (ev.type === 'preview_image') previewImageCard(ev, host);
   else if (ev.type === 'approval_required') approvalCard(ev);
   else if (ev.type === 'subagent_done') { /* summarised by subagent_end */ }
   return true;
@@ -352,6 +368,7 @@ async function send() {
           if (current) finalizeBubble();
           toolCard(ev); status.textContent = 'Running ' + ev.name; break;
         case 'tool_end': finishToolCard(ev); break;
+        case 'preview_image': previewImageCard(ev); break;
         case 'command_start': status.textContent = 'Running: ' + (ev.description || ev.command).slice(0, 60); break;
         case 'approval_required': approvalCard(ev); status.textContent = 'Waiting for your approval'; break;
         case 'approval': if (ev.id === undefined) note('Approval: ' + ev.tool + ' → ' + ev.decision + ' (' + (ev.reason || '') + ')'); break;
