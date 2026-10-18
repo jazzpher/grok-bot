@@ -51,6 +51,12 @@
   (plus `GROK_BROWSER_INTERACT=on` for click/type) and run through the legacy task harness (`/task`). The
   interactive agent (`POST /agent`) does not expose them yet; Playwright is an optional dependency
   (`pip install playwright && playwright install chromium`).
+- **Interactive browsing is read-and-click only.** `browse_open/see/scroll/click` (`GROK_AGENT_BROWSER=on`)
+  have no typing, no downloads and an ephemeral per-turn context, so logins, paywalls, cookie banners that need
+  text and any form that needs input are out of reach; pages that need JavaScript-heavy interaction may not work
+  with click-only. The 8-action cap per turn bounds long research sessions. Domain approval covers the top-level
+  document; subresource hosts are netguard-checked but not individually approved. Live-tested on Linux Chromium
+  only - Windows/macOS and real-model end-to-end runs are untested.
 - **Preview is render-only, single page, per turn.** `preview_page` (`GROK_PREVIEW=on`) screenshots workspace
   HTML for the interactive agent: no clicking/typing/scrolling, one page per call (desktop or mobile viewport),
   screenshots are clipped at 2000px height and capped at 3 previews per turn, and the image only helps when the
