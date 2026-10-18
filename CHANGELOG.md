@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `preview_page` tool (off by default, `GROK_PREVIEW=on`): renders a workspace HTML file in headless Chromium
+  and returns the screenshot to the model as an image plus measured layout facts (horizontal overflow, top
+  element boxes, best-effort contrast). Loopback-only workspace-confined static server; the page cannot reach
+  `file://`, other local ports, the LAN or the internet. Chromium starts on first preview and is killed at turn
+  end; 3 previews per turn; `GROK_PREVIEW_IMAGES=off` for text-only models. Ships the `ui-preview-pass` skill
+  under `docs/skills/`.
+
 ## [0.9.1] - 2026-10-17
 
 Review fixes: the data directory is stable, the session secret is explicit, and the
