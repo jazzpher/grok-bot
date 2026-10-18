@@ -43,6 +43,7 @@ new 0.9 surfaces (memory, automations, MCP, Telegram, plugins, images) add.
 | Images | large payloads, content sniffing | ≤4 per message, PNG/JPEG/WebP/GIF data URLs only, ~2 MB each, request cap 12 MB; images are not written to disk |
 | Skills import | zip path traversal / huge files | only `*/SKILL.md` entries, unsafe path segments rejected, 2 MB zip / 60 KB per skill, names validated by `SkillStore.save` |
 | Local provider | sending keys to a LAN host | only configurable through `GROK_LOCAL_API_URL` (server env), shown as its own provider; dummy key used when none given |
+| UI preview (`preview_page`) | a model-rendered page reaching local services or the internet; Chromium left running | off by default (`GROK_PREVIEW=on`); loopback-only static server on a random port, rooted at the workspace (symlinks and `..` rejected, Host header must match the bound port); the page's own requests are route-guarded to that one server — `file://`, other loopback ports, LAN and internet are aborted per request including redirect hops; read-only (no approval needed, nothing is written); Chromium is killed at turn end; screenshots are scrubbed from stored history |
 
 ## Reporting
 
