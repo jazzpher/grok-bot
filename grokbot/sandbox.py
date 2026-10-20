@@ -89,6 +89,7 @@ class CommandResult:
     truncated: bool = False
     backend: str = ''
     isolated: bool = False
+    stopped: bool = False
 
     def render(self):
         parts = []
@@ -97,7 +98,9 @@ class CommandResult:
         if self.stderr:
             parts.append('[stderr]\n' + self.stderr.rstrip('\n'))
         status = 'exit code %s' % self.exit_code if self.exit_code is not None else 'no exit code'
-        if self.timed_out:
+        if self.stopped:
+            status = 'STOPPED by user after %.1fs (process group killed)' % self.duration
+        elif self.timed_out:
             status = 'TIMED OUT after %.0fs (process group killed)' % self.duration
         tail = '[%s · %.1fs · %s%s%s]' % (status, self.duration, self.backend,
                                          '' if self.isolated else ' · no isolation',
@@ -183,7 +186,7 @@ class SubprocessBackend:
     def available(self):
         return True
 
-    def run(self, command, cwd, timeout, network=False, read_only=False):
+    def run(self, command, cwd, timeout, network=False, read_only=False, stop=None):
         env = {'PATH': os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin'), 'HOME': str(cwd), 'LANG': 'C.UTF-8',
                'LC_ALL': 'C.UTF-8', 'PYTHONIOENCODING': 'utf-8', 'PYTHONDONTWRITEBYTECODE': '1', 'TERM': 'dumb',
                'TMPDIR': str(cwd), 'GROKBOT_SANDBOX': 'subprocess', 'NO_COLOR': '1', 'CI': '1'}
@@ -215,20 +218,31 @@ class SubprocessBackend:
             {'creationflags': getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)}
         proc = subprocess.Popen(shell, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, **popen_kwargs)
-        timed_out = False
-        try:
-            out, err = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+        timed_out = stopped = False
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                out, err = proc.communicate(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            if stop is not None and stop.is_set():
+                stopped = True
+            elif time.monotonic() >= deadline:
+                timed_out = True
+            else:
+                continue
             self._kill(proc)
             try:
                 out, err = proc.communicate(timeout=5)
             except subprocess.TimeoutExpired:
                 out, err = b'', b''
+            break
         duration = time.monotonic() - started
         stdout, t1 = _bound(out)
         stderr, t2 = _bound(err, limit=config.COMMAND_MAX_OUTPUT // 4)
-        return CommandResult(stdout, stderr, None if timed_out else proc.returncode, duration, timed_out, t1 or t2, self.name, False)
+        return CommandResult(stdout, stderr, None if (timed_out or stopped) else proc.returncode, duration,
+                             timed_out, t1 or t2, self.name, False, stopped)
 
     @staticmethod
     def _kill(proc):
@@ -283,27 +297,48 @@ class DockerBackend:
         args += [self.image, 'sh', '-c', wrapper, str(int(timeout)), command]
         return args
 
-    def run(self, command, cwd, timeout, network=False, read_only=False):
+    def run(self, command, cwd, timeout, network=False, read_only=False, stop=None):
         name = 'grokbot-' + str(int(time.time() * 1000)) + '-' + str(os.getpid())
         mount = str(pathlib.Path(cwd).resolve()) + ':/workspace' + (':ro' if read_only else ':rw')
         args = self._run_args(name, mount, network, timeout, command)
         started = time.monotonic()
-        timed_out = False
-        try:
-            proc = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout + 10)
-            out, err, code = proc.stdout, proc.stderr, proc.returncode
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            subprocess.run(['docker', 'kill', name], capture_output=True, timeout=15)
-            out, err, code = exc.stdout or b'', exc.stderr or b'', None
+        timed_out = stopped = False
+        deadline = time.monotonic() + timeout + 10
+        proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        while True:
+            try:
+                out, err = proc.communicate(timeout=0.2)
+                code = proc.returncode
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            if stop is not None and stop.is_set():
+                stopped = True
+            elif time.monotonic() >= deadline:
+                timed_out = True
+            else:
+                continue
+            try:
+                subprocess.run(['docker', 'kill', name], capture_output=True, timeout=15)
+            except Exception:  # noqa: BLE001 - container may already be gone
+                pass
+            try:
+                out, err = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                out, err = proc.communicate()
+            code = proc.returncode
+            break
         duration = time.monotonic() - started
-        if code in (124, 137) and duration >= timeout - 0.5 and not timed_out:
+        if code in (124, 137) and duration >= timeout - 0.5 and not timed_out and not stopped:
             timed_out = True   # killed by the in-container `timeout`
+        if stopped:
+            code = None
         stdout, t1 = _bound(out)
         stderr, t2 = _bound(err, limit=config.COMMAND_MAX_OUTPUT // 4)
         if code == 125 and b'docker' in (err or b'').lower():
             stderr = 'Docker could not start the sandbox container (is the daemon running and the image "%s" pulled?).\n' % self.image + stderr
-        return CommandResult(stdout, stderr, code, duration, timed_out, t1 or t2, self.name + ':' + self.image, True)
+        return CommandResult(stdout, stderr, code, duration, timed_out, t1 or t2, self.name + ':' + self.image, True, stopped)
 
 
 class DisabledBackend:
