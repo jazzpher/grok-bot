@@ -334,7 +334,7 @@ class _FakeBackend:
         self.name = 'docker' if isolated else 'subprocess'
         self.ran = []
 
-    def run(self, command, cwd, timeout, network=False, read_only=False):
+    def run(self, command, cwd, timeout, network=False, read_only=False, stop=None):
         self.ran.append(command)
         return sandbox.CommandResult('ok', '', 0, 0.0, backend=self.name, isolated=self.isolated)
 

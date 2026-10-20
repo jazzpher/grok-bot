@@ -18,7 +18,7 @@ import time
 import threading
 from pathlib import Path
 
-from grokbot import __version__, agent as agent_core, config, providers
+from grokbot import __version__, agent as agent_core, backup as backup_mod, config, providers, runlog
 from grokbot.approvals import ApprovalBroker, SandboxPolicy, MODES, APPROVALS
 from grokbot.tools import ToolContext, default_registry
 
@@ -154,7 +154,8 @@ class Printer:
 
 def make_ctx(args, workspace, approvals):
     policy = SandboxPolicy(mode=args.sandbox, approval=args.approval, network=args.network)
-    return ToolContext(workspace=workspace, session_id='cli', policy=policy, approvals=approvals, stop=threading.Event())
+    return ToolContext(workspace=workspace, session_id='cli', policy=policy, approvals=approvals, stop=threading.Event(),
+                       extras={'run_source': 'cli'})
 
 
 def run_once(args, messages, ctx, registry, cfg, emit):
@@ -232,6 +233,77 @@ def cmd_chat(args):
             print('(%s)' % result.status)
 
 
+def cmd_backup(args):
+    data_dir = Path(args.data_dir).expanduser() if args.data_dir else backup_mod.default_data_dir()
+    extra = {}
+    if args.include_settings:
+        settings = Path(__file__).resolve().parent.parent / 'settings.json'
+        if settings.is_file():
+            extra['settings.json'] = settings
+    try:
+        manifest = backup_mod.create_backup(data_dir, args.out, extra_files=extra)
+    except backup_mod.BackupError as exc:
+        print('Backup failed: %s' % exc, file=sys.stderr)
+        return 1
+    print('Backup written to %s' % manifest['out'])
+    print('%d files (%d database%s: %s), %.1f KB' % (
+        manifest['files'], len(manifest['databases']), 's' if len(manifest['databases']) != 1 else '',
+        ', '.join(manifest['databases']) or 'none', manifest['bytes'] / 1024.0))
+    print('Test the restore sometime: grokbot restore --from %s --data-dir <scratch copy>' % manifest['out'])
+    return 0
+
+
+def cmd_restore(args):
+    data_dir = Path(args.data_dir).expanduser() if args.data_dir else backup_mod.default_data_dir()
+    try:
+        manifest, _ = backup_mod.read_manifest(args.from_zip)
+    except backup_mod.BackupError as exc:
+        print('Restore failed: %s' % exc, file=sys.stderr)
+        return 1
+    print('Backup from %s: %d files, databases: %s' % (manifest.get('created_iso'), manifest.get('files'),
+                                                       ', '.join(manifest.get('databases') or []) or 'none'))
+    print('This REPLACES the current data directory %s' % data_dir)
+    print('(the current contents are kept as a .pre-restore copy). Stop the grok-bot server first.')
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print('Refusing without confirmation: pass --yes', file=sys.stderr)
+            return 1
+        if input('Restore now? [y/N] ').strip().lower() not in ('y', 'yes'):
+            print('Aborted.')
+            return 1
+    try:
+        summary = backup_mod.restore_backup(args.from_zip, data_dir)
+    except backup_mod.BackupError as exc:
+        print('Restore failed: %s' % exc, file=sys.stderr)
+        return 1
+    print('Restored %d files to %s' % (summary['files'], summary['restored_to']))
+    if summary['previous_data_saved_at']:
+        print('Previous data kept at %s (delete it once you have checked the restore).' % summary['previous_data_saved_at'])
+    return 0
+
+
+def cmd_runs(args):
+    path = args.log or runlog.configured_path() or str(backup_mod.default_data_dir() / '.runlog.jsonl')
+    entries = runlog.recent(limit=args.limit, path=path)
+    if not entries:
+        print('No runs logged yet. The web UI logs every run to .runlog.jsonl in the data directory.')
+        return 0
+    for e in entries:
+        stamp = time.strftime('%m-%d %H:%M:%S', time.localtime(e.get('started', 0)))
+        line = '%s %-9s %-10s %5.1fs steps=%-3d tools=%-3d %s' % (
+            stamp, e.get('source', '?'), e.get('status', '?'), e.get('duration', 0.0),
+            e.get('steps', 0), e.get('tool_calls', 0), (e.get('goal') or '')[:60])
+        if e.get('error'):
+            line += '  ERROR: ' + e['error'][:120]
+        print(line)
+        if args.verbose:
+            for t in e.get('tools', []):
+                mark = 'ok ' if t.get('ok') else 'FAIL'
+                print('    [%s] %s (%.1fs)%s' % (mark, t.get('name'), t.get('duration', 0.0),
+                                                 ('  ' + t.get('error', '')[:100]) if t.get('error') else ''))
+    return 0
+
+
 def cmd_serve(args):
     import webui
     webui.app.config.update(MOCK=args.mock, MODEL=args.model or webui.DEFAULT_MODEL)
@@ -304,6 +376,18 @@ def main(argv=None):
     p_serve.add_argument('--model')
     p_serve.add_argument('--key')
     p_serve.add_argument('--mock', action='store_true')
+    p_backup = sub.add_parser('backup', help='back up the data directory (workspaces + databases) to a zip')
+    p_backup.add_argument('--out', default='grokbot-backup-%s.zip' % time.strftime('%Y%m%d-%H%M%S'))
+    p_backup.add_argument('--data-dir', help='default: GROK_WORKSPACE_DIR or the per-user grokbot data dir')
+    p_backup.add_argument('--include-settings', action='store_true', help='also include settings.json (contains provider keys)')
+    p_restore = sub.add_parser('restore', help='restore a backup zip over the data directory (verified before replacing)')
+    p_restore.add_argument('--from', dest='from_zip', required=True, metavar='ZIP')
+    p_restore.add_argument('--data-dir', help='default: GROK_WORKSPACE_DIR or the per-user grokbot data dir')
+    p_restore.add_argument('--yes', '-y', action='store_true', help='skip the confirmation prompt')
+    p_runs = sub.add_parser('runs', help='show the per-run log (id, status, duration, tool calls, errors)')
+    p_runs.add_argument('--limit', type=int, default=20)
+    p_runs.add_argument('--log', help='path to .runlog.jsonl (default: the configured one)')
+    p_runs.add_argument('--verbose', '-v', action='store_true', help='also list each tool call')
     p_tg = sub.add_parser('telegram', help='run only the Telegram gateway (no web server)')
     p_tg.add_argument('--token', help='bot token (default: GROK_TELEGRAM_TOKEN)')
     p_tg.add_argument('--allow', help='comma-separated Telegram user ids allowed to talk to the bot (default: GROK_TELEGRAM_ALLOWED_IDS)')
@@ -319,6 +403,12 @@ def main(argv=None):
         return cmd_serve(args)
     if args.command == 'telegram':
         return cmd_telegram(args)
+    if args.command == 'backup':
+        return cmd_backup(args)
+    if args.command == 'restore':
+        return cmd_restore(args)
+    if args.command == 'runs':
+        return cmd_runs(args)
     parser.print_help()
     return 0
 
