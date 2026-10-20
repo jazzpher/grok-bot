@@ -262,6 +262,31 @@ Partial text may already be visible, but neither the failed user turn nor partia
 assistant output is saved as conversation history. Successful asks still return
 strings. A stream ending without [DONE] is treated as interrupted.
 
+## Reliability: Stop, run log, backup/restore
+
+- **Stop works during waits too.** Pressing Stop interrupts a hung provider stream and a
+  running shell command within about a second (socket shutdown + process-group kill), not
+  only between steps. A provider stream also has a hard total cap
+  (`GROK_STREAM_TIMEOUT`, default 600s) so a dribbling provider cannot hang a turn forever.
+- **Every run is logged** to `.runlog.jsonl` in the data directory: run id, source, model,
+  goal, status, duration, steps, each tool call (name, ok, duration, error) and the final
+  error. Inspect with `grokbot runs [-v]` or `GET /runs`.
+- **Backup and restore:**
+
+  ```sh
+  python -m grokbot backup --out grokbot-backup.zip            # consistent DB snapshots + workspaces
+  python -m grokbot restore --from grokbot-backup.zip          # verifies first, keeps previous data
+  ```
+
+  Restore checks the archive (readable zip, `PRAGMA integrity_check` on every database) before
+  replacing anything, and keeps the previous data next to the data dir as
+  `.pre-restore-<timestamp>`. Stop the server before restoring.
+- **Optional edit review** (`GROK_APPROVE_EDITS=on`): file edits ask for approval with a
+  unified diff before they are applied. Do not combine with unattended schedules
+  (approval=never denies every edit there).
+- **Benchmark:** `python benchmark.py` runs 10 offline tasks (turns, edits, commands, Stop
+  latency, stream cap, backup/restore, run log) and prints a table.
+
 ## Tests
 
 ```sh
