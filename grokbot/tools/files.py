@@ -105,6 +105,94 @@ def _mutation_approval(ctx, arguments):
     return None
 
 
+def _edit_review(ctx, arguments, proposed, summary=''):
+    """Approval reason with a unified diff of the proposed change (GROK_APPROVE_EDITS=on).
+
+    Returns None when the flag is off, so current behavior is unchanged. ``proposed`` is the
+    file's content after the change; best-effort - if it cannot be computed, the tool's own
+    validation will raise the real error when it runs.
+    """
+    if not config.APPROVE_EDITS:
+        return None
+    path = str(arguments.get('path', ''))
+    try:
+        p = _ws(ctx).path(path)
+        before = _read_text(ctx, p) if p.is_file() else ''
+    except Exception:  # noqa: BLE001 - preview only
+        before = ''
+    if proposed is None:
+        return 'GROK_APPROVE_EDITS=on: review before applying. ' + (summary or ('Modify ' + path))
+    diff = list(difflib.unified_diff(before.split('\n'), proposed.split('\n'),
+                                     fromfile=path + ' (current)', tofile=path + ' (proposed)', lineterm='', n=2))
+    shown = '\n'.join(diff[:60]) + ('\n...(diff truncated)' if len(diff) > 60 else '')
+    if not shown:
+        shown = '(no textual difference)'
+    head = 'GROK_APPROVE_EDITS=on: review the proposed change before it is applied.'
+    if summary:
+        head += ' ' + summary
+    return (head + '\n' + shown)[:4000]
+
+
+def _write_approval(ctx, arguments):
+    reason = _mutation_approval(ctx, arguments)
+    if reason:
+        return reason
+    content = arguments.get('content')
+    return _edit_review(ctx, arguments, content if isinstance(content, str) else None)
+
+
+def _edit_approval(ctx, arguments):
+    reason = _mutation_approval(ctx, arguments)
+    if reason:
+        return reason
+    if not config.APPROVE_EDITS:
+        return None
+
+    def proposed():
+        old_text, new_text = arguments.get('old_text'), arguments.get('new_text')
+        if not isinstance(old_text, str) or not old_text or not isinstance(new_text, str):
+            return None
+        p = _ws(ctx).path(str(arguments.get('path', '')))
+        if not p.is_file():
+            return None
+        before = _read_text(ctx, p)
+        if before.count(old_text) == 0:
+            return None
+        if arguments.get('replace_all'):
+            return before.replace(old_text, new_text)
+        return before.replace(old_text, new_text, 1)
+
+    return _edit_review(ctx, arguments, proposed())
+
+
+def _copy_approval(ctx, arguments):
+    reason = _mutation_approval(ctx, arguments)
+    if reason:
+        return reason
+    if not config.APPROVE_EDITS:
+        return None
+    proposed = None
+    try:
+        src_p = _ws(ctx).path(str(arguments.get('source_path', '')))
+        if src_p.is_file() and not _is_binary(src_p.read_bytes()[:4096]):
+            proposed = src_p.read_bytes().decode('utf-8', errors='replace')
+    except Exception:  # noqa: BLE001 - preview only
+        proposed = None
+    return _edit_review(ctx, arguments, proposed,
+                        'Copy %s over %s.' % (arguments.get('source_path', ''), arguments.get('path', '')))
+
+
+def _docx_approval(ctx, arguments):
+    reason = _mutation_approval(ctx, arguments)
+    if reason:
+        return reason
+    if not config.APPROVE_EDITS:
+        return None
+    content = arguments.get('content')
+    lines = content.count('\n') + 1 if isinstance(content, str) else 0
+    return _edit_review(ctx, arguments, None, 'Write Word document %s (%d lines of content).' % (arguments.get('path', ''), lines))
+
+
 def _write_result(ctx, rel, content):
     lines = content.count('\n') + (1 if content and not content.endswith('\n') else 0)
     return 'Wrote %s (%d bytes, %d lines).' % (rel, len(content.encode('utf-8')), lines)
@@ -146,7 +234,7 @@ def register(registry):
                    'Never use this for .docx (use write_docx).',
                    {'type': 'object', 'properties': {
                        'path': {'type': 'string'}, 'content': {'type': 'string'}},
-                    'required': ['path', 'content']}, category='files', mutates=True, needs_approval=_mutation_approval)
+                    'required': ['path', 'content']}, category='files', mutates=True, needs_approval=_write_approval)
     @_guard
     def write_file(ctx, path, content):
         _tests_guard(ctx, path)
@@ -159,7 +247,7 @@ def register(registry):
                    {'type': 'object', 'properties': {
                        'path': {'type': 'string'}, 'old_text': {'type': 'string'}, 'new_text': {'type': 'string'},
                        'replace_all': {'type': 'boolean'}},
-                    'required': ['path', 'old_text', 'new_text']}, category='files', mutates=True, needs_approval=_mutation_approval)
+                    'required': ['path', 'old_text', 'new_text']}, category='files', mutates=True, needs_approval=_edit_approval)
     @_guard
     def edit_file(ctx, path, old_text, new_text, replace_all=False):
         _tests_guard(ctx, path)
@@ -298,7 +386,7 @@ def register(registry):
 
     @registry.tool('copy_file', 'Copy a workspace file byte-for-byte (use for exact copies instead of retyping).',
                    {'type': 'object', 'properties': {'source_path': {'type': 'string'}, 'path': {'type': 'string'}},
-                    'required': ['source_path', 'path']}, category='files', mutates=True, needs_approval=_mutation_approval)
+                    'required': ['source_path', 'path']}, category='files', mutates=True, needs_approval=_copy_approval)
     @_guard
     def copy_file(ctx, source_path, path):
         _tests_guard(ctx, path)
@@ -313,7 +401,7 @@ def register(registry):
 
     @registry.tool('write_docx', 'Write a real Word .docx document. Lines starting with "# " become headings; one paragraph per line.',
                    {'type': 'object', 'properties': {'path': {'type': 'string'}, 'content': {'type': 'string'}},
-                    'required': ['path', 'content']}, category='files', mutates=True, needs_approval=_mutation_approval)
+                    'required': ['path', 'content']}, category='files', mutates=True, needs_approval=_docx_approval)
     @_guard
     def write_docx(ctx, path, content):
         _tests_guard(ctx, path)
