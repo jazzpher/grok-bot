@@ -51,6 +51,16 @@ COMPACT_RATIO = 0.70          # summarize when estimated tokens exceed this shar
 KEEP_RECENT_MESSAGES = 8      # always keep the newest messages verbatim after compaction
 TOOL_MODE = _choice('GROK_TOOL_MODE', 'auto', ('auto', 'native', 'json'))
 
+# Provider stream
+# Hard wall-clock cap for ONE streaming provider response. The per-read timeout in
+# providers.DEFAULT_TIMEOUT cannot bound a provider that keeps dribbling bytes; this can.
+STREAM_TIMEOUT = _int('GROK_STREAM_TIMEOUT', 600, 30)
+
+# Edit review: when on, write_file/edit_file/copy_file/write_docx ask for approval with a
+# unified diff of the proposed change before anything is written. Scheduled/unattended runs
+# use approval=never, which DENIES these edits - do not combine this with unattended schedules.
+APPROVE_EDITS = _choice('GROK_APPROVE_EDITS', 'off', ('on', 'off')) == 'on'
+
 # Sandbox
 # GROK_SANDBOX_BACKEND is the documented name; GROK_SANDBOX is accepted as a short alias.
 SANDBOX_BACKEND = _choice('GROK_SANDBOX_BACKEND' if os.environ.get('GROK_SANDBOX_BACKEND') else 'GROK_SANDBOX', 'auto',
