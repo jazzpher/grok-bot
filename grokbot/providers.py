@@ -7,8 +7,13 @@ bounded, malformed SSE lines are skipped, and a provider that rejects the
 the JSON protocol.
 """
 import json
+import socket
+import threading
+import time
 
 import requests
+
+from grokbot import config
 
 DEFAULT_TIMEOUT = (10, 120)
 MAX_BODY_BYTES = 6 * 1024 * 1024
@@ -33,10 +38,38 @@ def _headers(key):
     return {'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json', 'Accept': 'text/event-stream'}
 
 
-def iter_sse_lines(response, max_bytes=MAX_BODY_BYTES):
+def _force_close(res):
+    """Wake a thread blocked in recv() and release the response.
+
+    ``response.close()`` alone does not interrupt a blocked read on Linux (close(2) does not
+    wake a recv in another thread); shutting the socket down first does.
+    """
+    try:
+        raw = getattr(res, 'raw', None)
+        http_resp = getattr(raw, '_fp', None)
+        buffered = getattr(http_resp, 'fp', None)
+        sock = getattr(getattr(buffered, 'raw', None), '_sock', None)
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+    except Exception:  # noqa: BLE001 - best effort
+        pass
+    try:
+        res.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def iter_sse_lines(response, max_bytes=MAX_BODY_BYTES, deadline=None):
     received = 0
     pending = bytearray()
     for chunk in response.iter_content(chunk_size=8192):
+        if deadline is not None and time.monotonic() > deadline:
+            # Checked per chunk, not per line: a provider that dribbles bytes without ever
+            # completing an SSE line would otherwise run forever under the per-read timeout.
+            raise ProviderError('Provider stream exceeded the total time limit.')
         if not chunk:
             continue
         received += len(chunk)
@@ -60,8 +93,15 @@ def _looks_like_tools_rejection(body):
                                or 'unrecognized' in text or 'function' in text)
 
 
-def stream_chat(cfg, messages, tools=None, stop=None, timeout=DEFAULT_TIMEOUT, extra=None, include_usage=True, max_bytes=MAX_BODY_BYTES):
-    """Yield events from a streaming chat completion. ``stop`` is an optional threading.Event."""
+def stream_chat(cfg, messages, tools=None, stop=None, timeout=DEFAULT_TIMEOUT, extra=None, include_usage=True, max_bytes=MAX_BODY_BYTES,
+                total_timeout=None):
+    """Yield events from a streaming chat completion. ``stop`` is an optional threading.Event.
+
+    Cancellation is not just cooperative: a watchdog closes the socket as soon as ``stop`` is set, so a
+    hung or slow provider is interrupted right away instead of after the read timeout. ``total_timeout``
+    is a hard wall-clock cap for the whole stream (default config.STREAM_TIMEOUT); the per-read
+    ``timeout`` alone cannot bound a provider that keeps dribbling bytes.
+    """
     key, url, model = cfg
     payload = {'model': model, 'messages': messages, 'stream': True}
     if include_usage:
@@ -101,79 +141,110 @@ def stream_chat(cfg, messages, tools=None, stop=None, timeout=DEFAULT_TIMEOUT, e
     finish = None
     usage = None
     complete = False
-    with res:
-        for raw in iter_sse_lines(res, max_bytes):
-            if stop is not None and stop.is_set():
-                break
-            try:
-                line = raw.decode('utf-8')
-            except UnicodeDecodeError:
-                continue
-            if not line.startswith('data:'):
-                continue
-            data = line[5:].strip()
-            if data == '[DONE]':
-                complete = True
-                break
-            try:
-                event = json.loads(data)
-            except ValueError:
-                continue
-            if not isinstance(event, dict):
-                continue
-            if event.get('error') is not None:
-                err = event['error']
-                message = err.get('message') if isinstance(err, dict) else str(err)
-                raise ProviderError('Provider error: ' + str(message)[:300], (err.get('code') if isinstance(err, dict) else None))
-            if isinstance(event.get('usage'), dict):
-                usage = event['usage']
-            choices = event.get('choices')
-            if not isinstance(choices, list) or not choices:
-                continue
-            choice = choices[0] if isinstance(choices[0], dict) else {}
-            delta = choice.get('delta') if isinstance(choice.get('delta'), dict) else {}
-            if choice.get('finish_reason'):
-                finish = choice['finish_reason']
-            reasoning = delta.get('reasoning_content') or delta.get('reasoning')
-            if isinstance(reasoning, str) and reasoning:
-                yield {'type': 'reasoning', 'delta': reasoning}
-            content = delta.get('content')
-            if isinstance(content, str) and content:
-                yield {'type': 'text', 'delta': content}
-            elif isinstance(content, list):  # some providers stream content parts
-                for part in content:
-                    if isinstance(part, dict) and isinstance(part.get('text'), str) and part['text']:
-                        yield {'type': 'text', 'delta': part['text']}
-            tool_calls = delta.get('tool_calls')
-            if isinstance(tool_calls, list):
-                for tc in tool_calls:
-                    if not isinstance(tc, dict):
-                        continue
-                    index = tc.get('index', len(calls))
-                    slot = calls.setdefault(index, {'id': '', 'name': '', 'arguments': ''})
-                    if tc.get('id'):
-                        slot['id'] = str(tc['id'])
-                    fn = tc.get('function') if isinstance(tc.get('function'), dict) else {}
-                    name = fn.get('name')
-                    if isinstance(name, str) and name:
-                        if not slot['name']:
-                            slot['name'] = name          # usual case: full name in the first delta
-                        elif name != slot['name'] and not slot['name'].endswith(name):
-                            slot['name'] += name         # rare: name streamed in pieces
-                    if isinstance(fn.get('arguments'), str):
-                        slot['arguments'] += fn['arguments']
-            # Non-streaming style full message (some proxies send it once)
-            message = choice.get('message') if isinstance(choice.get('message'), dict) else None
-            if message:
-                if isinstance(message.get('content'), str) and message['content']:
-                    yield {'type': 'text', 'delta': message['content']}
-                for i, tc in enumerate(message.get('tool_calls') or []):
-                    if isinstance(tc, dict):
-                        fn = tc.get('function') or {}
-                        calls[('m', i)] = {'id': str(tc.get('id') or ''), 'name': str(fn.get('name') or ''),
-                                           'arguments': fn.get('arguments') if isinstance(fn.get('arguments'), str) else json.dumps(fn.get('arguments') or {})}
-                finish = finish or 'stop'
-                complete = True
+    limit = total_timeout if total_timeout is not None else config.STREAM_TIMEOUT
+    deadline = (time.monotonic() + limit) if limit else None
+    consumed = threading.Event()
+    if stop is not None or deadline is not None:
+        def _cancel_on_stop():
+            # Watchdog: force-close the socket the moment Stop is pressed or the hard total cap
+            # passes. Without this the read below stays blocked until the provider sends another
+            # byte (or enough bytes to fill a read buffer) or the read timeout fires.
+            while not consumed.wait(0.1):
+                if stop is not None and stop.is_set():
+                    _force_close(res)
+                    return
+                if deadline is not None and time.monotonic() > deadline:
+                    _force_close(res)
+                    return
+        threading.Thread(target=_cancel_on_stop, daemon=True).start()
+    try:
+        with res:
+            for raw in iter_sse_lines(res, max_bytes, deadline=deadline):
+                if stop is not None and stop.is_set():
+                    return
+                if deadline is not None and time.monotonic() > deadline:
+                    raise ProviderError('Provider stream exceeded the total time limit (%d s).' % limit)
+                try:
+                    line = raw.decode('utf-8')
+                except UnicodeDecodeError:
+                    continue
+                if not line.startswith('data:'):
+                    continue
+                data = line[5:].strip()
+                if data == '[DONE]':
+                    complete = True
+                    break
+                try:
+                    event = json.loads(data)
+                except ValueError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                if event.get('error') is not None:
+                    err = event['error']
+                    message = err.get('message') if isinstance(err, dict) else str(err)
+                    raise ProviderError('Provider error: ' + str(message)[:300], (err.get('code') if isinstance(err, dict) else None))
+                if isinstance(event.get('usage'), dict):
+                    usage = event['usage']
+                choices = event.get('choices')
+                if not isinstance(choices, list) or not choices:
+                    continue
+                choice = choices[0] if isinstance(choices[0], dict) else {}
+                delta = choice.get('delta') if isinstance(choice.get('delta'), dict) else {}
+                if choice.get('finish_reason'):
+                    finish = choice['finish_reason']
+                reasoning = delta.get('reasoning_content') or delta.get('reasoning')
+                if isinstance(reasoning, str) and reasoning:
+                    yield {'type': 'reasoning', 'delta': reasoning}
+                content = delta.get('content')
+                if isinstance(content, str) and content:
+                    yield {'type': 'text', 'delta': content}
+                elif isinstance(content, list):  # some providers stream content parts
+                    for part in content:
+                        if isinstance(part, dict) and isinstance(part.get('text'), str) and part['text']:
+                            yield {'type': 'text', 'delta': part['text']}
+                tool_calls = delta.get('tool_calls')
+                if isinstance(tool_calls, list):
+                    for tc in tool_calls:
+                        if not isinstance(tc, dict):
+                            continue
+                        index = tc.get('index', len(calls))
+                        slot = calls.setdefault(index, {'id': '', 'name': '', 'arguments': ''})
+                        if tc.get('id'):
+                            slot['id'] = str(tc['id'])
+                        fn = tc.get('function') if isinstance(tc.get('function'), dict) else {}
+                        name = fn.get('name')
+                        if isinstance(name, str) and name:
+                            if not slot['name']:
+                                slot['name'] = name          # usual case: full name in the first delta
+                            elif name != slot['name'] and not slot['name'].endswith(name):
+                                slot['name'] += name         # rare: name streamed in pieces
+                        if isinstance(fn.get('arguments'), str):
+                            slot['arguments'] += fn['arguments']
+                # Non-streaming style full message (some proxies send it once)
+                message = choice.get('message') if isinstance(choice.get('message'), dict) else None
+                if message:
+                    if isinstance(message.get('content'), str) and message['content']:
+                        yield {'type': 'text', 'delta': message['content']}
+                    for i, tc in enumerate(message.get('tool_calls') or []):
+                        if isinstance(tc, dict):
+                            fn = tc.get('function') or {}
+                            calls[('m', i)] = {'id': str(tc.get('id') or ''), 'name': str(fn.get('name') or ''),
+                                               'arguments': fn.get('arguments') if isinstance(fn.get('arguments'), str) else json.dumps(fn.get('arguments') or {})}
+                    finish = finish or 'stop'
+                    complete = True
+    except (requests.RequestException, OSError):
+        if stop is not None and stop.is_set():
+            return  # socket closed by the cancel watchdog: this is a user stop, not a provider error
+        if deadline is not None and time.monotonic() > deadline:
+            raise ProviderError('Provider stream exceeded the total time limit (%d s).' % limit)
+        raise
+    finally:
+        consumed.set()
+    if stop is not None and stop.is_set():
+        return  # cancelled while the stream was wrapping up: no finish, no partial tool calls
+    if deadline is not None and not complete and time.monotonic() > deadline:
+        raise ProviderError('Provider stream exceeded the total time limit (%d s).' % limit)
     if calls:
         ordered = [calls[k] for k in sorted(calls, key=lambda k: (isinstance(k, tuple), k))]
         for i, call in enumerate(ordered):
