@@ -113,6 +113,8 @@ def default_data_dir():
 
 
 WORKSPACES = default_data_dir().resolve()
+from grokbot import runlog as _runlog
+_runlog.configure(WORKSPACES / '.runlog.jsonl')
 
 def _session_secret():
     # Flask signs the session cookie (which carries the workspace/conversation owner id)
@@ -1094,7 +1096,8 @@ def run_owner_turn(owner, workspace, cid, text, *, emit, stop, images=None, uplo
         policy = dataclasses.replace(policy, approval='never')
     mcp_manager()
     ctx_extras = {'json_mode': json_mode, 'owner': owner, 'memory': memory_store(), 'conversations': store,
-                  'scheduler': scheduler(), 'uploads': list(uploads or []), 'unattended': unattended}
+                  'scheduler': scheduler(), 'uploads': list(uploads or []), 'unattended': unattended,
+                  'run_source': 'scheduled' if unattended else 'agent', 'conversation_id': cid}
     ctx_extras.update(extras or {})
     ctx = ToolContext(workspace=workspace, session_id=owner, policy=policy, approvals=APPROVALS, stop=stop, extras=ctx_extras)
     kept = []
@@ -1166,7 +1169,7 @@ class TelegramRunner:
         chat_id = owner.split(':', 1)[1] if ':' in owner else owner
         cid = self.conversation_for(owner)
         result, _ = run_owner_turn(owner, owner_workspace(owner), cid, text, emit=emit, stop=stop,
-                                   extras={'delivery': {'telegram_chat': chat_id}})
+                                   extras={'run_source': 'telegram', 'delivery': {'telegram_chat': chat_id}})
         return result
 
 
@@ -1270,6 +1273,16 @@ def agent_route():
             run.done.wait(0.1)
     return Response(generate(), content_type='application/x-ndjson; charset=utf-8',
                     headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/runs')
+def runs_log():
+    """Recent per-run log entries (id, status, duration, tool calls, errors) for debugging."""
+    try:
+        limit = max(1, min(int(request.args.get('limit', 50)), 200))
+    except ValueError:
+        limit = 50
+    return json_response({'runs': _runlog.recent(limit=limit)})
 
 
 @app.route('/agent/current')
