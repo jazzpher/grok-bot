@@ -61,6 +61,14 @@ class SandboxPolicy:
     def label(self):
         return self.mode + ' · ' + self.approval + (' · network' if self.network else '')
 
+    def for_unattended(self, allow_full_access=False):
+        """Policy for a run nobody is watching: approval is impossible (``never``), and full-access is downgraded to
+        workspace-write unless explicitly allowed, so ``full-access + on-request`` can never turn into YOLO."""
+        mode = self.mode
+        if mode == 'full-access' and not allow_full_access:
+            mode = 'workspace-write'
+        return dataclasses.replace(self, mode=mode, approval='never', allow=list(self.allow), deny=list(self.deny))
+
 
 def allow_pattern(tool, arguments):
     """Pattern stored by 'always allow': tool plus the first two command words."""

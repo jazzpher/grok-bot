@@ -13,6 +13,17 @@ def _fmt(ts):
     return dt.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M') if ts else '—'
 
 
+def _schedule_approval(ctx, arguments):
+    """A schedule is a standing instruction that later runs unattended, so the model never creates one silently:
+    the approval card shows exactly what will run and when. Only an interactive full-access + never (YOLO) policy
+    skips the prompt; unattended runs (approval=never) therefore cannot create schedules at all."""
+    policy = ctx.policy
+    if policy is not None and policy.yolo and not ctx.extras.get('unattended'):
+        return None
+    return 'Creates a recurring unattended run: %s · prompt: %s' % (
+        str(arguments.get('when', ''))[:120], str(arguments.get('prompt', ''))[:500])
+
+
 def register(registry):
     has_sched = lambda ctx: ctx.extras.get('scheduler') is not None  # noqa: E731
 
@@ -24,7 +35,8 @@ def register(registry):
                        'when': {'type': 'string'},
                        'prompt': {'type': 'string', 'description': 'The full task to run each time'},
                        'title': {'type': 'string', 'description': 'Short label'}},
-                    'required': ['when', 'prompt']}, category='automation', mutates=True, available=has_sched)
+                    'required': ['when', 'prompt']}, category='automation', mutates=True, available=has_sched,
+                   needs_approval=_schedule_approval)
     def schedule_task(ctx, when, prompt, title=''):
         try:
             job = ctx.extras['scheduler'].add(_owner(ctx), when, prompt, title, delivery=ctx.extras.get('delivery') or {})

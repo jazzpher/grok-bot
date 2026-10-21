@@ -1093,7 +1093,7 @@ def run_owner_turn(owner, workspace, cid, text, *, emit, stop, images=None, uplo
     mock = bool(app.config['MOCK'] and not cfg[0])
     policy = policy or POLICIES.load(owner)
     if unattended:
-        policy = dataclasses.replace(policy, approval='never')
+        policy = policy.for_unattended(gconfig.UNATTENDED_FULL_ACCESS)
     mcp_manager()
     ctx_extras = {'json_mode': json_mode, 'owner': owner, 'memory': memory_store(), 'conversations': store,
                   'scheduler': scheduler(), 'uploads': list(uploads or []), 'unattended': unattended,

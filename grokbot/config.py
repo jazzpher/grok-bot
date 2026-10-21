@@ -61,6 +61,11 @@ STREAM_TIMEOUT = _int('GROK_STREAM_TIMEOUT', 600, 30)
 # use approval=never, which DENIES these edits - do not combine this with unattended schedules.
 APPROVE_EDITS = _choice('GROK_APPROVE_EDITS', 'off', ('on', 'off')) == 'on'
 
+# Scheduled/unattended runs are never stronger than interactive ones: a saved full-access policy is downgraded to
+# workspace-write for them, so no host command runs without a human. Set GROK_UNATTENDED_FULL_ACCESS=on only if you
+# really want scheduled jobs to run shell commands with no approval at all.
+UNATTENDED_FULL_ACCESS = _choice('GROK_UNATTENDED_FULL_ACCESS', 'off', ('on', 'off')) == 'on'
+
 # Sandbox
 # GROK_SANDBOX_BACKEND is the documented name; GROK_SANDBOX is accepted as a short alias.
 SANDBOX_BACKEND = _choice('GROK_SANDBOX_BACKEND' if os.environ.get('GROK_SANDBOX_BACKEND') else 'GROK_SANDBOX', 'auto',
