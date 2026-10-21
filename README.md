@@ -36,7 +36,7 @@ python -m grokbot exec --mock "hello"           # offline smoke test, no key nee
 | Long-term memory | `save_memory` / `search_memory` / `forget_memory` tools; pinned + relevant memories are added to the system prompt each turn; the *Context* row under each reply shows exactly what was injected | **Memory** panel, `/memory`, `/remember <fact>`, `GET/POST /memories` |
 | Session search | `search_history` / `read_history` tools over the FTS5 conversation store | automatic |
 | Sub-agents | `delegate(task, context, max_steps)` runs an isolated turn with its own context and a reduced tool set (no memory writes, no nested delegation beyond `GROK_MAX_SUBAGENT_DEPTH`); its tool calls stream as a nested card | automatic |
-| Automations | `schedule_task` tool or the **Automations** panel: `every day at 08:00`, `every 2 hours`, `every monday at 9:00`, `in 30 minutes`, `tomorrow at 09:00`, or 5-field cron. Runs are *unattended*: approval policy forced to `never`, step budget `GROK_SCHEDULED_MAX_STEPS` (25); each run becomes a ⏰ conversation and a notification | `/schedules`, `GET/POST /schedules` |
+| Automations | `schedule_task` tool or the **Automations** panel: `every day at 08:00`, `every 2 hours`, `every monday at 9:00`, `in 30 minutes`, `tomorrow at 09:00`, or 5-field cron. Runs are *unattended*: approval policy forced to `never` and `full-access` downgraded to `workspace-write` (opt back in with `GROK_UNATTENDED_FULL_ACCESS=on`); a model-created schedule asks for approval first; step budget `GROK_SCHEDULED_MAX_STEPS` (25); each run becomes a ⏰ conversation and a notification | `/schedules`, `GET/POST /schedules` |
 | MCP client | `mcp.json` (or `GROK_MCP_CONFIG`) with `{"mcpServers": {"name": {"command", "args", "env"} or {"url", "headers"}}}`; tools appear as `mcp__<server>__<tool>`; `readOnlyHint`/`destructiveHint` annotations feed the approval policy | Settings → Integrations, `GET /mcp`, `POST /mcp/reload` |
 | Telegram | `GROK_TELEGRAM_TOKEN` + `GROK_TELEGRAM_ALLOWED_IDS=123,456` (fails closed without the allowlist). Long polling, streamed replies, approval buttons, `/new /stop /policy /status /help`; owner `tg:<chat_id>` with its own workspace, memory and policy | `python webui.py` starts it, or `python -m grokbot telegram` |
 | Plugins | `GROK_PLUGINS=my_module,other` — modules with `register(registry)`, `before_tool`, `after_tool`, `on_turn_end` hooks | — |
@@ -237,8 +237,18 @@ export GROK_APP_PASSWORD='a-long-unique-password'
 export GROK_SESSION_SECRET='a-long-random-session-secret'
 # For an HTTPS tunnel, also set:
 export GROK_SECURE_COOKIE=1
+# Behind N reverse proxies that append X-Forwarded-For (nginx, Caddy, Cloudflare Tunnel), rate-limit
+# logins per real client instead of per proxy address (never set this when clients reach the app directly):
+# export GROK_TRUSTED_PROXIES=1
 python webui.py
 ```
+
+Every password login opens the same owner account (`workspaces/owner`), so
+conversations, memory and schedules survive new browsers and cleared cookies.
+After 5 wrong passwords in 5 minutes an address is locked out for 5 minutes;
+a browser that has logged in before keeps a signed device cookie (90 days) and
+is never locked out, so a stranger sharing your Docker/tunnel address cannot
+lock you out.
 
 Do not commit secrets. Use environment variables or the authenticated Settings
 form. Settings entered in the form are memory-only and disappear on restart.

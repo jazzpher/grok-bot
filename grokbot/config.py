@@ -4,8 +4,10 @@ Legacy defaults (25 files / 32 KB / 256 KB / 12 steps / 24 000 chars) were far
 below what a coding or research agent needs. The new defaults are generous but
 still bounded; operators can lower or raise them with the GROK_* variables.
 """
+import ctypes
 import os
 import shutil
+import sys
 
 
 def _int(name, default, minimum=0):
@@ -61,6 +63,11 @@ STREAM_TIMEOUT = _int('GROK_STREAM_TIMEOUT', 600, 30)
 # use approval=never, which DENIES these edits - do not combine this with unattended schedules.
 APPROVE_EDITS = _choice('GROK_APPROVE_EDITS', 'off', ('on', 'off')) == 'on'
 
+# Scheduled/unattended runs are never stronger than interactive ones: a saved full-access policy is downgraded to
+# workspace-write for them, so no host command runs without a human. Set GROK_UNATTENDED_FULL_ACCESS=on only if you
+# really want scheduled jobs to run shell commands with no approval at all.
+UNATTENDED_FULL_ACCESS = _choice('GROK_UNATTENDED_FULL_ACCESS', 'off', ('on', 'off')) == 'on'
+
 # Sandbox
 # GROK_SANDBOX_BACKEND is the documented name; GROK_SANDBOX is accepted as a short alias.
 SANDBOX_BACKEND = _choice('GROK_SANDBOX_BACKEND' if os.environ.get('GROK_SANDBOX_BACKEND') else 'GROK_SANDBOX', 'auto',
@@ -113,3 +120,29 @@ BROWSER_EXECUTABLE = os.environ.get('GROK_BROWSER_EXECUTABLE', '')
 BROWSER_ARGS = [a for a in os.environ.get('GROK_BROWSER_ARGS', '').split(',') if a]
 BROWSER_TEXT_LIMIT = _int('GROK_BROWSER_TEXT_LIMIT', 12000, 200)
 BROWSER_TIMEOUT = _int('GROK_BROWSER_TIMEOUT', 30, 1)
+
+
+# Secrets protection. Every child process (approved shell commands on the subprocess backend, MCP servers, the
+# browser) runs as the same uid as this process, and a scrubbed child env does not help: /proc/<ppid>/environ
+# still shows the environment this process was started with (GROK_API_KEY, GROK_TELEGRAM_TOKEN, GROK_APP_PASSWORD,
+# GROK_SESSION_SECRET, search keys), and changing os.environ later does not rewrite it. Marking the process
+# non-dumpable makes the kernel refuse /proc/<pid>/environ, /proc/<pid>/mem and ptrace to same-uid processes that
+# lack CAP_SYS_PTRACE. Side effects: no core dumps, and debuggers such as py-spy/gdb need root (or
+# GROK_ALLOW_DEBUGGER=on to skip this).
+ALLOW_DEBUGGER = _choice('GROK_ALLOW_DEBUGGER', 'off', ('on', 'off')) == 'on'
+_PR_SET_DUMPABLE, _PR_GET_DUMPABLE = 4, 3
+
+
+def protect_process():
+    """Make this process's /proc/<pid>/environ unreadable to its children (Linux). True when protected."""
+    if ALLOW_DEBUGGER or not sys.platform.startswith('linux'):
+        return False
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0)
+        return libc.prctl(_PR_GET_DUMPABLE, 0, 0, 0, 0) == 0
+    except (OSError, AttributeError):
+        return False
+
+
+PROCESS_PROTECTED = protect_process()

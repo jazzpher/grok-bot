@@ -21,6 +21,7 @@ import requests
 from flask import Flask, Response, request, render_template, render_template_string, session, redirect, send_file
 from agent_loop import ACTION_SCHEMA, result_action_schema, Workspace, run_loop
 from documents import extract_text, MAX_UPLOAD
+from itsdangerous import BadSignature, URLSafeTimedSerializer
 from werkzeug.utils import secure_filename
 from task_harness import OutputBudgetExceeded, TaskManager, MAX_RETRIES, is_transient, friendly_provider_error
 import task_harness
@@ -96,6 +97,17 @@ PASSWORD = os.environ.get('GROK_APP_PASSWORD', '')
 FRAME_ANCESTORS = os.environ.get('GROK_FRAME_ANCESTORS', "'none'")
 # Any tunnel/reverse proxy must explicitly use exposed mode, even on loopback.
 DEPLOYMENT_MODE = os.environ.get('GROK_DEPLOYMENT_MODE', 'local')
+# Password mode has exactly one owner: every successful login maps to this id, so conversations, memory, files,
+# policy and schedules persist across logins, browsers and devices (workspaces/owner).
+OWNER_SID = 'owner'
+# Login rate limiting is keyed by client IP. Behind Docker, a tunnel or a reverse proxy every visitor shares one
+# remote_addr, so set GROK_TRUSTED_PROXIES to the number of proxies in front of the app to key it by the
+# X-Forwarded-For entry they appended instead (never trusted when unset). A browser that has logged in before also
+# carries a signed device cookie that exempts it from the lockout, so strangers cannot lock the owner out.
+_trusted = os.environ.get('GROK_TRUSTED_PROXIES', '').strip()
+TRUSTED_PROXIES = int(_trusted) if _trusted.isdigit() else 0
+LOGIN_WINDOW, LOGIN_MAX_FAILURES = 300, 5
+DEVICE_COOKIE, DEVICE_MAX_AGE = 'grok_device', 90 * 24 * 3600
 def default_data_dir():
     """Where workspaces, the session secret and the SQLite stores live by default.
 
@@ -220,16 +232,46 @@ def login():
         return redirect('/')
     error = ''
     if request.method == 'POST':
-        ip = request.remote_addr or 'unknown'
+        ip = login_client_ip()
         now = time.monotonic()
-        recent = [t for t in login_failures.get(ip, []) if now - t < 300]
-        if len(recent) >= 5:
+        for key in [k for k, v in login_failures.items() if not v or now - v[-1] >= LOGIN_WINDOW]:
+            del login_failures[key]   # prune, so the dict cannot grow without bound
+        recent = [t for t in login_failures.get(ip, []) if now - t < LOGIN_WINDOW]
+        if len(recent) >= LOGIN_MAX_FAILURES and not known_device():
             return Response('Too many attempts. Try again in five minutes.', status=429)
         if hmac.compare_digest(request.form.get('password', ''), PASSWORD):
-            session.clear(); session['authenticated'] = True
-            return redirect('/')
+            session.clear(); session['authenticated'] = True; session['sid'] = OWNER_SID
+            response = redirect('/')
+            response.set_cookie(DEVICE_COOKIE, _device_signer().dumps(OWNER_SID), max_age=DEVICE_MAX_AGE, httponly=True,
+                                samesite=app.config['SESSION_COOKIE_SAMESITE'], secure=app.config['SESSION_COOKIE_SECURE'])
+            return response
         recent.append(now); login_failures[ip] = recent; error = 'Wrong password.'
     return render_template_string(LOGIN, error=error)
+
+
+def login_client_ip():
+    """Key for login rate limiting: the peer address, or with GROK_TRUSTED_PROXIES=N the address the outermost of
+    our N proxies saw (the N-th entry from the right of X-Forwarded-For). Client-supplied entries are never used."""
+    if TRUSTED_PROXIES:
+        hops = [h.strip() for h in request.headers.get('X-Forwarded-For', '').split(',') if h.strip()]
+        if len(hops) >= TRUSTED_PROXIES:
+            return hops[-TRUSTED_PROXIES]
+    return request.remote_addr or 'unknown'
+
+
+def _device_signer():
+    return URLSafeTimedSerializer(app.secret_key, salt='grokbot-owner-device')
+
+
+def known_device():
+    """True when this browser logged in successfully before (signed cookie); it still has to know the password."""
+    token = request.cookies.get(DEVICE_COOKIE)
+    if not token:
+        return False
+    try:
+        return _device_signer().loads(token, max_age=DEVICE_MAX_AGE) == OWNER_SID
+    except BadSignature:
+        return False
 
 
 def client():
@@ -740,39 +782,7 @@ def custom_url_error(url):
     the HTTP client at request time; this check is best-effort hardening, not
     a guarantee against a hostile DNS rebinding.
     """
-    if len(url) > 200:
-        return 'That URL is too long.'
-    try:
-        p = urlparse(url)
-    except ValueError:
-        return 'That URL is not valid.'
-    if p.scheme != 'https':
-        return 'Custom endpoints must use https.'
-    if p.username or p.password:
-        return 'URLs with a username or password are not allowed.'
-    host = p.hostname
-    if not host:
-        return 'That URL is not valid.'
-    try:
-        ips = [ipaddress.ip_address(host)]
-    except ValueError:
-        try:
-            infos = socket.getaddrinfo(host, p.port or 443, proto=socket.IPPROTO_TCP)
-        except OSError:
-            return 'Could not verify that host. Pick a listed provider or a public https endpoint.'
-        ips = []
-        for info in infos:
-            try:
-                ips.append(ipaddress.ip_address(info[4][0]))
-            except (ValueError, IndexError, TypeError):
-                pass
-    if not ips:
-        return 'Could not verify that host. Pick a listed provider or a public https endpoint.'
-    for ip in ips:
-        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
-                or ip.is_reserved or ip.is_unspecified):
-            return 'Custom endpoints must be public internet addresses.'
-    return None
+    return netguard.public_url_error(url)   # one implementation of the SSRF rules (netguard._bad_ip)
 
 
 def mask_key(key):
@@ -1093,7 +1103,7 @@ def run_owner_turn(owner, workspace, cid, text, *, emit, stop, images=None, uplo
     mock = bool(app.config['MOCK'] and not cfg[0])
     policy = policy or POLICIES.load(owner)
     if unattended:
-        policy = dataclasses.replace(policy, approval='never')
+        policy = policy.for_unattended(gconfig.UNATTENDED_FULL_ACCESS)
     mcp_manager()
     ctx_extras = {'json_mode': json_mode, 'owner': owner, 'memory': memory_store(), 'conversations': store,
                   'scheduler': scheduler(), 'uploads': list(uploads or []), 'unattended': unattended,

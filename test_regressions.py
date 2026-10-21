@@ -4,6 +4,7 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -52,6 +53,61 @@ class AuthRegressionTests(unittest.TestCase):
     def test_direct_loopback_still_works(self):
         with patch.object(webui, 'PASSWORD', ''):
             self.assertEqual(webui.app.test_client().get('/', base_url='http://localhost').status_code, 200)
+
+    def test_password_login_maps_to_one_persistent_owner(self):
+        with patch.object(webui, 'PASSWORD', 'test-password'):
+            first, second = webui.app.test_client(), webui.app.test_client()
+            for client in (first, second):
+                self.assertEqual(client.post('/login', data={'password': 'test-password'}).status_code, 302)
+                client.get('/history')
+            with first.session_transaction() as s1, second.session_transaction() as s2:
+                self.assertEqual(s1['sid'], webui.OWNER_SID)
+                self.assertEqual(s2['sid'], webui.OWNER_SID)
+            # Logging in again (new browser, cleared cookies) keeps the owner's conversations.
+            cid = webui.conversation_store().create(webui.OWNER_SID, 'keep me')
+            again = webui.app.test_client()
+            again.post('/login', data={'password': 'test-password'})
+            with again.session_transaction() as s3:
+                self.assertEqual(s3['sid'], webui.OWNER_SID)
+            self.assertIn(cid, [c['id'] for c in webui.conversation_store().list(webui.OWNER_SID)])
+
+    def test_login_lockout_cannot_lock_out_a_known_owner_device(self):
+        with patch.object(webui, 'PASSWORD', 'test-password'), patch.dict(webui.login_failures, clear=True):
+            owner = webui.app.test_client()
+            self.assertEqual(owner.post('/login', data={'password': 'test-password'}).status_code, 302)
+            self.assertIsNotNone(owner.get_cookie(webui.DEVICE_COOKIE))
+            stranger = webui.app.test_client()   # same shared address (Docker bridge / tunnel)
+            for _ in range(webui.LOGIN_MAX_FAILURES):
+                self.assertEqual(stranger.post('/login', data={'password': 'guess'}).status_code, 200)
+            self.assertEqual(stranger.post('/login', data={'password': 'test-password'}).status_code, 429)
+            self.assertEqual(owner.post('/login', data={'password': 'test-password'}).status_code, 302)
+            forged = webui.app.test_client()
+            forged.set_cookie(webui.DEVICE_COOKIE, 'owner.forged.sig')
+            self.assertEqual(forged.post('/login', data={'password': 'test-password'}).status_code, 429)
+
+    def test_login_lockout_uses_forwarded_for_only_with_trusted_proxies(self):
+        def fail(client, xff):
+            return client.post('/login', data={'password': 'guess'}, headers={'X-Forwarded-For': xff}).status_code
+        with patch.object(webui, 'PASSWORD', 'test-password'), patch.dict(webui.login_failures, clear=True):
+            client = webui.app.test_client()
+            for i in range(webui.LOGIN_MAX_FAILURES):   # untrusted header: spoofed addresses share the peer's counter
+                fail(client, '198.51.100.%d' % i)
+            self.assertEqual(fail(client, '198.51.100.99'), 429)
+        with patch.object(webui, 'PASSWORD', 'test-password'), patch.object(webui, 'TRUSTED_PROXIES', 1), \
+                patch.dict(webui.login_failures, clear=True):
+            client = webui.app.test_client()
+            for _ in range(webui.LOGIN_MAX_FAILURES):
+                fail(client, 'spoofed, 203.0.113.7')
+            self.assertEqual(fail(client, '203.0.113.7'), 429)
+            # another visitor behind the same proxy is not locked out, whatever they put in front of the header
+            self.assertEqual(fail(client, '203.0.113.7, 203.0.113.8'), 200)
+            self.assertEqual(list(webui.login_failures), ['203.0.113.7', '203.0.113.8'])
+
+    def test_login_failures_are_pruned(self):
+        with patch.object(webui, 'PASSWORD', 'test-password'), patch.dict(webui.login_failures, clear=True):
+            webui.login_failures['192.0.2.1'] = [time.monotonic() - webui.LOGIN_WINDOW - 1]
+            webui.app.test_client().post('/login', data={'password': 'guess'})
+            self.assertNotIn('192.0.2.1', webui.login_failures)
 
     def test_authenticated_proxy_ignores_forwarded_identity(self):
         client = webui.app.test_client()

@@ -54,9 +54,9 @@ class TerminalApprovals(ApprovalBroker):
 
     def request(self, ctx, tool, arguments, reason):
         policy = ctx.policy or SandboxPolicy()
-        from grokbot.approvals import pattern_matches, allow_pattern
+        from grokbot.approvals import allow_rule_matches, allow_pattern
         for pattern in policy.allow:
-            if pattern_matches(pattern, tool, arguments):
+            if allow_rule_matches(pattern, tool, arguments):
                 return 'allow'
         if policy.approval == 'never' or self.auto == 'deny':
             print('[denied] %s: %s' % (tool, reason), file=sys.stderr)
