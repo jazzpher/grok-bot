@@ -7,6 +7,8 @@ import unittest
 from unittest import mock
 import time
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -253,6 +255,24 @@ class SandboxHeuristicTests(unittest.TestCase):
         policy = SandboxPolicy(mode='full-access', approval='never')
         self.assertTrue(policy.yolo)
         self.assertEqual(SandboxPolicy.from_dict({'mode': 'bogus', 'approval': 'x'}).mode, 'workspace-write')
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), '/proc is Linux-only')
+    def test_approved_command_cannot_read_parent_secrets_from_proc(self):
+        # A fresh interpreter started with a secret in its env, as the web server is; its subprocess-backend child
+        # tries to read the parent's original environment through /proc.
+        script = ('import sys, tempfile; sys.path.insert(0, %r)\n'
+                  'from grokbot import sandbox\n'
+                  'r = sandbox.SubprocessBackend().run("cat /proc/$PPID/environ", tempfile.mkdtemp(), 10)\n'
+                  'print(r.stdout)\n') % str(Path(__file__).resolve().parent)
+        canary = 'xai-canary-' + os.urandom(6).hex()
+
+        def child_output(**extra):
+            env = {k: v for k, v in os.environ.items() if k != 'GROK_ALLOW_DEBUGGER'}
+            env.update(GROK_API_KEY=canary, **extra)
+            return subprocess.run([sys.executable, '-c', script], env=env, capture_output=True, text=True, timeout=30).stdout
+        self.assertNotIn(canary, child_output())
+        self.assertIn(canary, child_output(GROK_ALLOW_DEBUGGER='on'))   # proves the probe works: opt-out leaks again
+        self.assertTrue(gconfig.PROCESS_PROTECTED or gconfig.ALLOW_DEBUGGER)
 
     def test_describe_reports_backend(self):
         info = sandbox.describe()

@@ -12,6 +12,11 @@ new 0.9 surfaces (memory, automations, MCP, Telegram, plugins, images) add.
   **Without Docker** (subprocess backend, nothing confines a command) every `run_command` asks for approval in every
   mode, saved "always allow" rules are not applied and "always" means "this once"; only the explicit
   `full-access` + `never` policy skips the prompt. Unattended runs (scheduler) cannot prompt, so they deny shell commands.
+- Children never see the server's secrets: their env is scrubbed, and on Linux the server marks itself non-dumpable at
+  startup (`prctl(PR_SET_DUMPABLE, 0)`), so an approved command, MCP server or browser cannot read the server's
+  original environment (API key, Telegram token, app password, session secret) from `/proc/<ppid>/environ`.
+  `GROK_ALLOW_DEBUGGER=on` turns this off (for py-spy/gdb). Files the server's user can read (for example the data
+  dir's `.session_secret`) are still readable by host commands: prefer the Docker backend, or set `GROK_SESSION_SECRET`.
 - **Hardline blocklist** (all backends, all policies including full-access + never): root/home deletion, disk
   formatting or raw device writes, fork bombs, drive wipes (`format`, `del /s`, `rd /s`, `Remove-Item -Recurse` on a
   drive root), `diskpart`/`bcdedit`, download-piped-to-shell. A small pattern list, not a complete safety net.
