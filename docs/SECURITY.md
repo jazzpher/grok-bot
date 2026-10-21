@@ -8,7 +8,8 @@ new 0.9 surfaces (memory, automations, MCP, Telegram, plugins, images) add.
 - **Workspace jail.** File tools resolve paths inside `workspaces/<owner>` (symlinks rejected, size/count caps).
 - **Sandbox policy** (`read-only` / `workspace-write` / `full-access` × `on-request` / `never`). `run_command` is
   classified (read-only allowlist, destructive patterns, network, escape attempts) and asks, denies or runs
-  accordingly. Persisted "always allow" rules are per owner and pattern-scoped.
+  accordingly. Persisted "always allow" rules are per owner and pattern-scoped, and never match a command that chains, pipes,
+  substitutes or redirects (`npm test` does not cover `npm test && curl …`).
   **Without Docker** (subprocess backend, nothing confines a command) every `run_command` asks for approval in every
   mode, saved "always allow" rules are not applied and "always" means "this once"; only the explicit
   `full-access` + `never` policy skips the prompt. Unattended runs (scheduler) cannot prompt, so they deny shell commands.

