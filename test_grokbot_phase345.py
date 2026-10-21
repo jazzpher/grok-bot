@@ -268,6 +268,24 @@ class MCPStdioTest(unittest.TestCase):
         self.assertFalse(first.ok)
         self.assertEqual(self.registry.execute(ctx, 'mcp__fake__echo', {'text': 'again'}).output, 'echo: again')
 
+    def test_unannotated_tools_default_to_destructive_per_mcp_spec(self):
+        ww = ToolContext(workspace=self.ws, session_id='s', policy=SandboxPolicy(mode='workspace-write'))
+        full = ToolContext(workspace=self.ws, session_id='s', policy=SandboxPolicy(mode='full-access'))
+
+        def approval(annotations, ctx=ww):
+            tool = {'name': 'send', 'inputSchema': {'type': 'object', 'properties': {}}}
+            if annotations is not None:
+                tool['annotations'] = annotations
+            return self.manager._spec('srv', tool).needs_approval(ctx, {})
+        self.assertIsNotNone(approval(None), 'no annotations: destructiveHint defaults to true, so ask')
+        self.assertIsNotNone(approval({}))
+        self.assertIsNotNone(approval({'readOnlyHint': False}))
+        self.assertIsNotNone(approval({'destructiveHint': True}))
+        self.assertIsNone(approval({'destructiveHint': False}), 'explicitly non-destructive write tool')
+        self.assertIsNone(approval({'readOnlyHint': True}))
+        self.assertIsNone(approval({'readOnlyHint': True, 'destructiveHint': True}), 'destructiveHint is ignored for read-only tools')
+        self.assertIsNone(approval(None, full), 'full-access keeps running MCP tools without a prompt')
+
     def test_tool_name_is_openai_safe(self):
         self.assertEqual(tool_name('fs', 'read_file'), 'mcp__fs__read_file')
         long = tool_name('a' * 40, 'b.c/d' * 20)
