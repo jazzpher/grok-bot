@@ -782,39 +782,7 @@ def custom_url_error(url):
     the HTTP client at request time; this check is best-effort hardening, not
     a guarantee against a hostile DNS rebinding.
     """
-    if len(url) > 200:
-        return 'That URL is too long.'
-    try:
-        p = urlparse(url)
-    except ValueError:
-        return 'That URL is not valid.'
-    if p.scheme != 'https':
-        return 'Custom endpoints must use https.'
-    if p.username or p.password:
-        return 'URLs with a username or password are not allowed.'
-    host = p.hostname
-    if not host:
-        return 'That URL is not valid.'
-    try:
-        ips = [ipaddress.ip_address(host)]
-    except ValueError:
-        try:
-            infos = socket.getaddrinfo(host, p.port or 443, proto=socket.IPPROTO_TCP)
-        except OSError:
-            return 'Could not verify that host. Pick a listed provider or a public https endpoint.'
-        ips = []
-        for info in infos:
-            try:
-                ips.append(ipaddress.ip_address(info[4][0]))
-            except (ValueError, IndexError, TypeError):
-                pass
-    if not ips:
-        return 'Could not verify that host. Pick a listed provider or a public https endpoint.'
-    for ip in ips:
-        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
-                or ip.is_reserved or ip.is_unspecified):
-            return 'Custom endpoints must be public internet addresses.'
-    return None
+    return netguard.public_url_error(url)   # one implementation of the SSRF rules (netguard._bad_ip)
 
 
 def mask_key(key):

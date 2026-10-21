@@ -297,6 +297,23 @@ class NetguardTests(unittest.TestCase):
         with patch('grokbot.netguard.socket.getaddrinfo', return_value=[(2, 1, 6, '', ('93.184.216.34', 443))]):
             self.assertIsNone(netguard.public_url_error('https://example.com'))
 
+    def test_non_global_ranges_are_blocked(self):
+        # CGNAT / Tailscale (100.64.0.0/10) is not in ipaddress.is_private; plus a few other special-purpose ranges.
+        for host in ('100.100.100.100', '100.64.0.1', '100.127.255.254', '[::ffff:100.100.100.100]',
+                     '[64:ff9b::7f00:1]', '[fc00::1]', '[2001:db8::1]'):
+            self.assertIsNotNone(netguard.public_url_error('https://%s/' % host), host)
+            self.assertEqual(netguard.resolve_public_ips(host.strip('[]'), 443), [], host)
+        with patch('grokbot.netguard.socket.getaddrinfo', return_value=[(2, 1, 6, '', ('100.101.102.103', 443))]):
+            self.assertIsNotNone(netguard.public_url_error('https://nas.tailnet.example'))
+            self.assertEqual(netguard.resolve_public_ips('nas.tailnet.example', 443), [])
+        for host in ('8.8.8.8', '1.1.1.1', '[2606:4700:4700::1111]'):
+            self.assertIsNone(netguard.public_url_error('https://%s/' % host), host)
+
+    def test_custom_provider_endpoint_uses_the_same_guard(self):
+        import webui
+        self.assertIsNotNone(webui.custom_url_error('https://100.100.100.100/v1/chat/completions'))
+        self.assertIsNone(webui.custom_url_error('https://8.8.8.8/v1/chat/completions'))
+
 
 class CompactionTests(unittest.TestCase):
     def messages(self, n=12):

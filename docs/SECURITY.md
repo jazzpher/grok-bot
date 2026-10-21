@@ -27,8 +27,8 @@ new 0.9 surfaces (memory, automations, MCP, Telegram, plugins, images) add.
   packages into the image fails by design: create a venv inside the workspace instead
   (`python -m venv .venv && .venv/bin/pip install …`). The subprocess backend is *not* an isolation boundary —
   see LIMITATIONS.
-- **Network guard** for `fetch_url` / web search / custom provider URLs: public hosts only, DNS re-checked, redirects
-  bounded, response sizes capped.
+- **Network guard** for `fetch_url` / web search / custom provider URLs: public hosts only (`ipaddress` `is_global`, so
+  private, loopback, link-local and CGNAT/Tailscale `100.64.0.0/10` are refused), DNS re-checked, redirects bounded, response sizes capped.
 - **Keys** are kept in memory (or env), scrubbed from command environments, never forwarded to a different endpoint
   than the one they were saved for.
 - **Exposure** needs `GROK_DEPLOYMENT_MODE=exposed` + `GROK_APP_PASSWORD`; cookies are HttpOnly, SameSite configurable,

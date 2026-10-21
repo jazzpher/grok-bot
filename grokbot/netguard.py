@@ -14,7 +14,9 @@ MAX_URL_LENGTH = 2048
 
 
 def _bad_ip(ip):
-    return (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
+    # not is_global also covers ranges the is_private list misses, notably 100.64.0.0/10 (carrier-grade NAT, used by
+    # Tailscale for every device on a tailnet), 192.0.0.0/24 and the IPv6 special-purpose blocks.
+    return (not ip.is_global or ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
             or ip.is_reserved or ip.is_unspecified)
 
 
