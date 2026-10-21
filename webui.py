@@ -96,6 +96,9 @@ PASSWORD = os.environ.get('GROK_APP_PASSWORD', '')
 FRAME_ANCESTORS = os.environ.get('GROK_FRAME_ANCESTORS', "'none'")
 # Any tunnel/reverse proxy must explicitly use exposed mode, even on loopback.
 DEPLOYMENT_MODE = os.environ.get('GROK_DEPLOYMENT_MODE', 'local')
+# Password mode has exactly one owner: every successful login maps to this id, so conversations, memory, files,
+# policy and schedules persist across logins, browsers and devices (workspaces/owner).
+OWNER_SID = 'owner'
 def default_data_dir():
     """Where workspaces, the session secret and the SQLite stores live by default.
 
@@ -226,7 +229,7 @@ def login():
         if len(recent) >= 5:
             return Response('Too many attempts. Try again in five minutes.', status=429)
         if hmac.compare_digest(request.form.get('password', ''), PASSWORD):
-            session.clear(); session['authenticated'] = True
+            session.clear(); session['authenticated'] = True; session['sid'] = OWNER_SID
             return redirect('/')
         recent.append(now); login_failures[ip] = recent; error = 'Wrong password.'
     return render_template_string(LOGIN, error=error)

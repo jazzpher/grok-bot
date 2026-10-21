@@ -53,6 +53,23 @@ class AuthRegressionTests(unittest.TestCase):
         with patch.object(webui, 'PASSWORD', ''):
             self.assertEqual(webui.app.test_client().get('/', base_url='http://localhost').status_code, 200)
 
+    def test_password_login_maps_to_one_persistent_owner(self):
+        with patch.object(webui, 'PASSWORD', 'test-password'):
+            first, second = webui.app.test_client(), webui.app.test_client()
+            for client in (first, second):
+                self.assertEqual(client.post('/login', data={'password': 'test-password'}).status_code, 302)
+                client.get('/history')
+            with first.session_transaction() as s1, second.session_transaction() as s2:
+                self.assertEqual(s1['sid'], webui.OWNER_SID)
+                self.assertEqual(s2['sid'], webui.OWNER_SID)
+            # Logging in again (new browser, cleared cookies) keeps the owner's conversations.
+            cid = webui.conversation_store().create(webui.OWNER_SID, 'keep me')
+            again = webui.app.test_client()
+            again.post('/login', data={'password': 'test-password'})
+            with again.session_transaction() as s3:
+                self.assertEqual(s3['sid'], webui.OWNER_SID)
+            self.assertIn(cid, [c['id'] for c in webui.conversation_store().list(webui.OWNER_SID)])
+
     def test_authenticated_proxy_ignores_forwarded_identity(self):
         client = webui.app.test_client()
         with patch.object(webui, 'PASSWORD', 'test-password'), patch.object(webui, 'DEPLOYMENT_MODE', 'exposed', create=True):

@@ -49,7 +49,7 @@ Each tool is a `ToolSpec` (name, description, JSON-schema parameters, handler, `
 - `workspaces/.conversations.sqlite3` — `ConversationStore`: per-session conversations, display entries (with tool
   events), the model-facing context (compacted messages + running summary), FTS5 search (LIKE fallback).
 - `workspaces/.tasks.sqlite3` — the durable background `TaskManager` (unchanged legacy harness).
-- `workspaces/<sid>/` — files; `uploads/` is read-only for the agent; `.skills/` via `SkillStore`.
+- `workspaces/<sid>/` — files (`<sid>` is `owner` for every login in password mode, a random per-browser id in local mode); `uploads/` is read-only for the agent; `.skills/` via `SkillStore`.
 
 ## HTTP surface added in 0.2
 `POST /agent` (NDJSON events), `GET /agent/current`, `POST /agent/approve`, `GET /agent/pending`,
