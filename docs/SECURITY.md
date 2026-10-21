@@ -32,7 +32,9 @@ new 0.9 surfaces (memory, automations, MCP, Telegram, plugins, images) add.
 - **Keys** are kept in memory (or env), scrubbed from command environments, never forwarded to a different endpoint
   than the one they were saved for.
 - **Exposure** needs `GROK_DEPLOYMENT_MODE=exposed` + `GROK_APP_PASSWORD`; cookies are HttpOnly, SameSite configurable,
-  CSP/frame-ancestors headers set, login rate-limited.
+  CSP/frame-ancestors headers set, login rate-limited (per address; `X-Forwarded-For` only with `GROK_TRUSTED_PROXIES=N`; a
+  browser that logged in before carries a signed device cookie and is exempt, so a shared Docker/tunnel address cannot
+  lock the owner out).
 
 ## New in 0.9
 

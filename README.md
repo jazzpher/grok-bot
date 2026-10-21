@@ -237,8 +237,18 @@ export GROK_APP_PASSWORD='a-long-unique-password'
 export GROK_SESSION_SECRET='a-long-random-session-secret'
 # For an HTTPS tunnel, also set:
 export GROK_SECURE_COOKIE=1
+# Behind N reverse proxies that append X-Forwarded-For (nginx, Caddy, Cloudflare Tunnel), rate-limit
+# logins per real client instead of per proxy address (never set this when clients reach the app directly):
+# export GROK_TRUSTED_PROXIES=1
 python webui.py
 ```
+
+Every password login opens the same owner account (`workspaces/owner`), so
+conversations, memory and schedules survive new browsers and cleared cookies.
+After 5 wrong passwords in 5 minutes an address is locked out for 5 minutes;
+a browser that has logged in before keeps a signed device cookie (90 days) and
+is never locked out, so a stranger sharing your Docker/tunnel address cannot
+lock you out.
 
 Do not commit secrets. Use environment variables or the authenticated Settings
 form. Settings entered in the form are memory-only and disappear on restart.
