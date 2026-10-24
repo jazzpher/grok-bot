@@ -104,8 +104,10 @@ def register(registry):
                    needs_approval=_domain_approval)
     def browse_open(ctx, url):
         host = agent_browser.host_of(url)
+        # Reached only after the approval gate. Recorded before loading so the route guard lets this
+        # top-level navigation through (it refuses navigations to hosts not in this set).
+        _approved_hosts(ctx).add(host)
         state, images = _run(ctx, _session(ctx).open, url)
-        _approved_hosts(ctx).add(host)               # only reached after approval + successful open
         return _pack(ctx, 'browse_open', {'url': url}, state, images)
 
     @registry.tool('browse_see',

@@ -261,6 +261,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             body = PAGE_TWO.encode()
         elif self.path == '/other':
             body = PAGE_OTHER.encode()
+        elif self.path == '/busy':
+            body = b'<html><body>busy<script>setTimeout(() => { while (true) {} }, 2000)</script></body></html>'
         elif self.path == '/redir-loop':
             self.send_response(302)
             self.send_header('Location', 'http://127.0.0.1:%d/secret' % self.server.port)
@@ -369,6 +371,48 @@ class LiveChromiumTests(unittest.TestCase):
             with self.assertRaises(BrowserError, msg=bad):
                 self.session.open(bad, {'127.0.0.1', 'localhost'})
 
+    def test_wedged_page_is_killed_not_hung(self):
+        with mock.patch('grokbot.agent_browser._action_deadline', return_value=6):
+            self.session.open(self.base_a + '/busy', {self.A}, False)
+            import time as _time
+            _time.sleep(3)
+            started = _time.monotonic()
+            with self.assertRaises(BrowserError) as cm:
+                self.session.see({self.A}, False)
+            self.assertLess(_time.monotonic() - started, 20)
+            self.assertIn('stopped responding', str(cm.exception))
+        # The session recovers with a fresh browser on the next action.
+        self.assertEqual(self.session.open(self.base_a + '/two', {self.A}, False)['snapshot']['title'], 'Second')
+
+    def test_browser_processes_do_not_inherit_secrets(self):
+        import os as _os
+        with mock.patch.dict(_os.environ, {'GROK_CANARY_API_KEY': 'canary-31337'}):
+            self.session.open(self.base_a + '/two', {self.A}, False)
+            from grokbot import agent_browser as _ab
+            pids = [self.session._driver_pid] + _ab._descendants(self.session._driver_pid)
+            self.assertGreater(len(pids), 1)
+            for pid in pids:
+                try:
+                    with open('/proc/%d/environ' % pid, 'rb') as fh:
+                        self.assertNotIn(b'canary-31337', fh.read(), pid)
+                except FileNotFoundError:
+                    pass
+
+    def test_unapproved_navigation_refused_before_request(self):
+        approved = {self.A}
+        snap = self.session.open(self.base_a + '/', approved, False)['snapshot']
+        index = next(e['index'] for e in snap['elements'] if 'site-b' in (e.get('href') or ''))
+        hits = []
+        original = _Handler.do_GET
+
+        def counting(handler):
+            hits.append(handler.headers.get('Host', ''))
+            return original(handler)
+        with mock.patch.object(_Handler, 'do_GET', counting):
+            with self.assertRaises(BrowserError):
+                self.session.click(index, None, approved, False)
+        self.assertFalse([h for h in hits if h.startswith(self.B)], hits)
+
     def test_close_kills_browser(self):
         self.session.open(self.base_a + '/', {self.A})
         browser = self.session._browser
@@ -377,6 +421,20 @@ class LiveChromiumTests(unittest.TestCase):
         self.assertIsNone(self.session._browser)
         with self.assertRaises(Exception):
             browser.new_context()
+
+
+class HardeningUnitTests(unittest.TestCase):
+    def test_scrubbed_env_drops_secrets(self):
+        from grokbot.agent_browser import scrubbed_env
+        env = scrubbed_env({'PATH': '/bin', 'GROK_API_KEY': 'x', 'GROK_TELEGRAM_TOKEN': 'y', 'GROK_APP_PASSWORD': 'z',
+                            'GROK_SESSION_SECRET': 's', 'TAVILY_API_KEY': 't', 'HOME': '/h'})
+        self.assertEqual(env, {'PATH': '/bin', 'HOME': '/h'})
+
+    def test_browse_screenshot_labelled_untrusted(self):
+        from grokbot.agent import _screenshot_note
+        self.assertIn('UNTRUSTED', _screenshot_note('browse_open'))
+        self.assertIn('not a message from the user', _screenshot_note('browse_click'))
+        self.assertIn('critique the layout', _screenshot_note('preview_page'))
 
 
 if __name__ == '__main__':
