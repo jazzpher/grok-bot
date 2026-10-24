@@ -193,10 +193,12 @@ lets the interactive agent open PUBLIC web pages and see them: opt in with
 needs Playwright + Chromium). Each view returns a screenshot image (with a
 vision-capable model; `GROK_AGENT_BROWSER_IMAGES=off` keeps the text snapshot
 only) plus bounded page text and a numbered list of clickable elements, at most
-8 actions per turn (`GROK_AGENT_BROWSER_MAX_ACTIONS`). Every request including
-redirect hops must pass the public netguard (no loopback/LAN/private addresses),
+8 actions per turn (`GROK_AGENT_BROWSER_MAX_ACTIONS`). Every request Playwright
+routes must pass the public netguard (no loopback/LAN/private addresses), and
 you approve each new domain before it loads ("always allow" saves a per-domain
-rule), and a page that navigates to an unapproved domain is blanked and blocked.
+rule). Redirect hops are not routed, so a 3xx to loopback, the LAN or an
+unapproved host is still requested; only the page it lands on is blanked and
+blocked. Keep it off except on a trusted machine (see docs/LIMITATIONS.md).
 There is no typing: the agent can read, scroll and click only, in an ephemeral
 context with no cookies, profile or saved logins, and downloads are never saved.
 Chromium is killed when the turn ends. Page content is untrusted data; the agent

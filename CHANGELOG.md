@@ -32,6 +32,12 @@ Reliability pack: real cancellation, per-run log, backup/restore, optional edit 
 - **benchmark.py**: 10 offline tasks (plain turns, file edits, commands, Stop latency, stream
   cap, backup/restore, run log) for before/after comparisons.
 
+### Fixed
+
+- Docs: `preview_page`'s route guard does not see redirect hops (Playwright does not route them); it is safe
+  only because the preview server never answers 3xx. Its docstrings, docs/SECURITY.md and the README's web
+  browsing paragraph no longer claim per-hop checks.
+
 ## [0.9.3] - 2026-10-18
 
 ### Added
