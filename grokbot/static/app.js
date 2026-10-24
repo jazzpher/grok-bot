@@ -82,7 +82,7 @@ function toolCard(ev) {
 function previewImageCard(ev, host) {
   const box = el('details', 'toolcard preview ok');
   const sum = el('summary');
-  sum.appendChild(el('b', '', 'preview'));
+  sum.appendChild(el('b', '', ev.tool === 'preview_page' ? 'preview' : (ev.tool || 'preview')));
   sum.appendChild(el('code', '', (ev.name || 'screenshot').slice(0, 120)));
   box.appendChild(sum);
   if (typeof ev.data_url === 'string' && /^data:image\/(png|jpeg|webp|gif);base64,/.test(ev.data_url)) {

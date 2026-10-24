@@ -183,9 +183,24 @@ search the web. It still cannot send messages, buy things, or reach files outsid
 workspace unless you choose `full-access`. Browser automation (`browse_open`,
 `browse_read`, and `browse_click`/`browse_type` with `GROK_BROWSER_INTERACT=on`) is
 opt-in with `GROK_BROWSER_ENABLED=on` and currently runs in **durable background
-tasks** only, not yet in the interactive composer. Completion of
+tasks** only. Completion of
 background tasks verifies only the explicit supported byte checks, not every
 possible semantic goal. Review generated content.
+
+**Web browsing** (`browse_open` / `browse_see` / `browse_scroll` / `browse_click`)
+lets the interactive agent open PUBLIC web pages and see them: opt in with
+`GROK_AGENT_BROWSER=on` (separate from `GROK_BROWSER_ENABLED` and `GROK_PREVIEW`;
+needs Playwright + Chromium). Each view returns a screenshot image (with a
+vision-capable model; `GROK_AGENT_BROWSER_IMAGES=off` keeps the text snapshot
+only) plus bounded page text and a numbered list of clickable elements, at most
+8 actions per turn (`GROK_AGENT_BROWSER_MAX_ACTIONS`). Every request including
+redirect hops must pass the public netguard (no loopback/LAN/private addresses),
+you approve each new domain before it loads ("always allow" saves a per-domain
+rule), and a page that navigates to an unapproved domain is blanked and blocked.
+There is no typing: the agent can read, scroll and click only, in an ephemeral
+context with no cookies, profile or saved logins, and downloads are never saved.
+Chromium is killed when the turn ends. Page content is untrusted data; the agent
+is instructed never to follow instructions found on a page.
 
 **UI preview** (`preview_page`) lets the interactive agent SEE the HTML it
 writes: opt in with `GROK_PREVIEW=on` (separate from `GROK_BROWSER_ENABLED`;

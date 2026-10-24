@@ -32,6 +32,30 @@ Reliability pack: real cancellation, per-run log, backup/restore, optional edit 
 - **benchmark.py**: 10 offline tasks (plain turns, file edits, commands, Stop latency, stream
   cap, backup/restore, run log) for before/after comparisons.
 
+## [0.9.3] - 2026-10-18
+
+### Added
+
+- **Interactive web browsing for the /agent composer** (`browse_open` / `browse_see` / `browse_scroll` /
+  `browse_click`, off by default behind `GROK_AGENT_BROWSER=on`; needs Playwright + Chromium). The agent opens
+  public web pages in a headless Chromium and receives each view as a screenshot image (vision models;
+  `GROK_AGENT_BROWSER_IMAGES=off` keeps the text snapshot only) plus a bounded text snapshot with numbered
+  clickable elements. Safety shape: the public netguard (no loopback, LAN, private or reserved addresses, no
+  userinfo) vets each request Playwright routes - top-level navigations, subresources and WebSockets - before it
+  is sent, and the user approves each new domain before it loads (per-domain "always allow" rules; a one-time
+  allow covers that host for the turn; navigations to an unapproved host are refused before they are sent). **Known
+  gap:** redirect hops are *not* vetted - Playwright does not route them - so a public or approved page that
+  answers 3xx to `127.0.0.1`, a LAN address or an unapproved host still gets that request sent; only the final
+  page is checked afterwards, then blanked and refused (its content never reaches the model, but the request
+  itself already happened). The netguard's DNS lookup is separate from Chromium's own, so DNS rebinding is left
+  to Chromium's built-in local-network checks. Keep the feature off except on a trusted machine until a
+  vetting-proxy fix lands (see docs/LIMITATIONS.md). No typing exists, the browser context is ephemeral (no
+  cookies, profile or saved logins) and downloads are never accepted; the Playwright driver and Chromium start
+  from a scrubbed environment (no API keys or tokens); each browse action has a wall-clock limit after which the
+  browser is killed; screenshots reach the model labelled as untrusted page content; at most
+  `GROK_AGENT_BROWSER_MAX_ACTIONS` (default 8) browse actions per turn; Chromium is killed at turn end.
+  Unattended runs (scheduler) cannot prompt, so domains without a saved rule are denied there.
+
 ## [0.9.2] - 2026-10-17
 
 Hard-test fixes (live runs against a small free model, reproduced offline).

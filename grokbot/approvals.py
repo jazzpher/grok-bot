@@ -71,8 +71,19 @@ class SandboxPolicy:
         return dataclasses.replace(self, mode=mode, approval='never', allow=list(self.allow), deny=list(self.deny))
 
 
+def _browse_host(arguments):
+    """Exact lowercase hostname of a browse_open URL argument, else ''."""
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(str(arguments.get('url', ''))).hostname or ''
+    except ValueError:
+        return ''
+    return host.strip().lower().rstrip('.')
+
+
 def allow_pattern(tool, arguments):
-    """Pattern stored by 'always allow': tool plus the first two command words."""
+    """Pattern stored by 'always allow': tool plus the first two command words;
+    for browse_open, the exact page hostname (per-domain approval)."""
     if tool == 'run_command':
         try:
             tokens = shlex.split(str(arguments.get('command', '')))
@@ -80,6 +91,8 @@ def allow_pattern(tool, arguments):
             tokens = str(arguments.get('command', '')).split()
         words = [t for t in tokens[:2] if t and not t.startswith('-')]
         return 'run_command:' + ' '.join(words[:2] or ['*'])
+    if tool == 'browse_open':
+        return 'browse_open:' + (_browse_host(arguments) or '*')
     return tool + ':*'
 
 
@@ -99,6 +112,9 @@ def pattern_matches(pattern, tool, arguments):
         words = [t for t in tokens if t and not t.startswith('-')]
         want = p_match.split()
         return words[:len(want)] == want
+    if tool == 'browse_open':
+        host = _browse_host(arguments)
+        return bool(host) and host == p_match
     return False
 
 
