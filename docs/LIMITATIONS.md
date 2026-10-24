@@ -26,6 +26,11 @@
   `BRAVE_API_KEY`, or `GROK_SEARXNG_URL` for reliable results.
 - **Durable background tasks still use the legacy JSON harness** (`/task`), not the new agent loop. They are
   resumable across restarts but do not get native tool calling, the sandbox policy or web tools yet.
+- **The run log is a debug aid, not an audit trail.** `.runlog.jsonl` is local, rotated by
+  size, and records tool names/durations/errors, not full arguments or outputs.
+- **Cancellation is fast, not instant.** Stop interrupts a hung stream or running command in
+  about a second (poll interval), and a tool already past its point of no return (a half-written
+  file) is not rolled back.
 - **Reconnect is coarse.** If the page reloads during a turn, the worker keeps running and the result is persisted;
   the UI polls `/agent/current` and re-renders from the stored entry instead of resuming the live stream.
 - **Single-process state.** Sessions, pending approvals and running turns live in process memory; run one worker

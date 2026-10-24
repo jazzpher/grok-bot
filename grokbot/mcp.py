@@ -376,7 +376,9 @@ class MCPManager:
         schema.setdefault('properties', {})
         annotations = tool.get('annotations') if isinstance(tool.get('annotations'), dict) else {}
         read_only = bool(annotations.get('readOnlyHint'))
-        destructive = bool(annotations.get('destructiveHint'))
+        # MCP spec: destructiveHint defaults to true for tools that are not read-only, so an unannotated tool is
+        # treated as destructive (asks first) unless the server explicitly says otherwise.
+        destructive = not read_only and bool(annotations.get('destructiveHint', True))
         remote_name = tool['name']
         description = '[MCP %s] %s' % (server, (tool.get('description') or remote_name).strip()[:800])
 

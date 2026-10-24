@@ -18,7 +18,7 @@ from typing import Callable, Dict, List, Optional
 
 import requests
 
-from grokbot import compaction, config, providers, sandbox
+from grokbot import compaction, config, providers, runlog, sandbox
 from grokbot.approvals import SandboxPolicy
 from grokbot.tools import ToolContext, ToolRegistry
 
@@ -357,6 +357,9 @@ def run_turn(messages: List[dict], registry: ToolRegistry, ctx: ToolContext, cfg
         elif isinstance(content, list):
             goal = ' '.join(p.get('text', '') for p in content if isinstance(p, dict) and p.get('type') == 'text')
         break
+    turn_started = time.time()
+    ctx.extras.setdefault('run_tools', [])
+    ctx.extras.setdefault('run_goal', goal[:200])
     if ctx.extras.get('depth', 0) == 0 and not ctx.extras.get('quiet'):
         send_info = context_info(ctx, registry, goal)
         emit(send_info)
@@ -371,7 +374,11 @@ def run_turn(messages: List[dict], registry: ToolRegistry, ctx: ToolContext, cfg
     status = 'completed'
     url = cfg[1] if isinstance(cfg, (tuple, list)) and len(cfg) > 1 else ''
 
+    last_error = {'text': ''}
+
     def send(event):
+        if event.get('type') == 'error':
+            last_error['text'] = str(event.get('text') or '')
         emit(event)
 
     try:
@@ -528,7 +535,13 @@ def run_turn(messages: List[dict], registry: ToolRegistry, ctx: ToolContext, cfg
         plugins.run_turn_end(ctx, result)
     except Exception:  # noqa: BLE001
         pass
-    send({'type': 'done', 'status': status, 'steps': steps, 'tool_calls': tool_count, 'usage': usage_total, 'usage_reported': usage_reported})
+    if runlog.configured_path():
+        try:
+            runlog.record(runlog.entry_from_turn(ctx, result, turn_started, last_error['text']))
+        except Exception:  # noqa: BLE001 - logging must never break a turn
+            pass
+    send({'type': 'done', 'status': status, 'steps': steps, 'tool_calls': tool_count, 'usage': usage_total,
+          'usage_reported': usage_reported, 'run_id': ctx.turn_id})
     return result
 
 
@@ -569,6 +582,12 @@ def _execute_calls(registry, ctx, calls, send):
         result = registry.execute(ctx, call['name'], parsed)
         send({'type': 'tool_end', 'id': call['id'], 'name': call['name'], 'ok': result.ok, 'output': result.output,
               'duration': round(result.duration, 3), 'truncated': result.truncated})
+        log = ctx.extras.get('run_tools')
+        if isinstance(log, list) and len(log) < runlog.MAX_TOOLS_PER_RUN:
+            record = {'name': call['name'], 'ok': result.ok, 'duration': round(result.duration, 3)}
+            if not result.ok:
+                record['error'] = (result.output or '')[:200]
+            log.append(record)
         return result
 
     results = [None] * len(calls)

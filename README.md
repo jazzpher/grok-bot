@@ -36,7 +36,7 @@ python -m grokbot exec --mock "hello"           # offline smoke test, no key nee
 | Long-term memory | `save_memory` / `search_memory` / `forget_memory` tools; pinned + relevant memories are added to the system prompt each turn; the *Context* row under each reply shows exactly what was injected | **Memory** panel, `/memory`, `/remember <fact>`, `GET/POST /memories` |
 | Session search | `search_history` / `read_history` tools over the FTS5 conversation store | automatic |
 | Sub-agents | `delegate(task, context, max_steps)` runs an isolated turn with its own context and a reduced tool set (no memory writes, no nested delegation beyond `GROK_MAX_SUBAGENT_DEPTH`); its tool calls stream as a nested card | automatic |
-| Automations | `schedule_task` tool or the **Automations** panel: `every day at 08:00`, `every 2 hours`, `every monday at 9:00`, `in 30 minutes`, `tomorrow at 09:00`, or 5-field cron. Runs are *unattended*: approval policy forced to `never`, step budget `GROK_SCHEDULED_MAX_STEPS` (25); each run becomes a ⏰ conversation and a notification | `/schedules`, `GET/POST /schedules` |
+| Automations | `schedule_task` tool or the **Automations** panel: `every day at 08:00`, `every 2 hours`, `every monday at 9:00`, `in 30 minutes`, `tomorrow at 09:00`, or 5-field cron. Runs are *unattended*: approval policy forced to `never` and `full-access` downgraded to `workspace-write` (opt back in with `GROK_UNATTENDED_FULL_ACCESS=on`); a model-created schedule asks for approval first; step budget `GROK_SCHEDULED_MAX_STEPS` (25); each run becomes a ⏰ conversation and a notification | `/schedules`, `GET/POST /schedules` |
 | MCP client | `mcp.json` (or `GROK_MCP_CONFIG`) with `{"mcpServers": {"name": {"command", "args", "env"} or {"url", "headers"}}}`; tools appear as `mcp__<server>__<tool>`; `readOnlyHint`/`destructiveHint` annotations feed the approval policy | Settings → Integrations, `GET /mcp`, `POST /mcp/reload` |
 | Telegram | `GROK_TELEGRAM_TOKEN` + `GROK_TELEGRAM_ALLOWED_IDS=123,456` (fails closed without the allowlist). Long polling, streamed replies, approval buttons, `/new /stop /policy /status /help`; owner `tg:<chat_id>` with its own workspace, memory and policy | `python webui.py` starts it, or `python -m grokbot telegram` |
 | Plugins | `GROK_PLUGINS=my_module,other` — modules with `register(registry)`, `before_tool`, `after_tool`, `on_turn_end` hooks | — |
@@ -252,8 +252,18 @@ export GROK_APP_PASSWORD='a-long-unique-password'
 export GROK_SESSION_SECRET='a-long-random-session-secret'
 # For an HTTPS tunnel, also set:
 export GROK_SECURE_COOKIE=1
+# Behind N reverse proxies that append X-Forwarded-For (nginx, Caddy, Cloudflare Tunnel), rate-limit
+# logins per real client instead of per proxy address (never set this when clients reach the app directly):
+# export GROK_TRUSTED_PROXIES=1
 python webui.py
 ```
+
+Every password login opens the same owner account (`workspaces/owner`), so
+conversations, memory and schedules survive new browsers and cleared cookies.
+After 5 wrong passwords in 5 minutes an address is locked out for 5 minutes;
+a browser that has logged in before keeps a signed device cookie (90 days) and
+is never locked out, so a stranger sharing your Docker/tunnel address cannot
+lock you out.
 
 Do not commit secrets. Use environment variables or the authenticated Settings
 form. Settings entered in the form are memory-only and disappear on restart.
@@ -276,6 +286,31 @@ streams return an InterruptedReply status to callers; the CLI stays interactive.
 Partial text may already be visible, but neither the failed user turn nor partial
 assistant output is saved as conversation history. Successful asks still return
 strings. A stream ending without [DONE] is treated as interrupted.
+
+## Reliability: Stop, run log, backup/restore
+
+- **Stop works during waits too.** Pressing Stop interrupts a hung provider stream and a
+  running shell command within about a second (socket shutdown + process-group kill), not
+  only between steps. A provider stream also has a hard total cap
+  (`GROK_STREAM_TIMEOUT`, default 600s) so a dribbling provider cannot hang a turn forever.
+- **Every run is logged** to `.runlog.jsonl` in the data directory: run id, source, model,
+  goal, status, duration, steps, each tool call (name, ok, duration, error) and the final
+  error. Inspect with `grokbot runs [-v]` or `GET /runs`.
+- **Backup and restore:**
+
+  ```sh
+  python -m grokbot backup --out grokbot-backup.zip            # consistent DB snapshots + workspaces
+  python -m grokbot restore --from grokbot-backup.zip          # verifies first, keeps previous data
+  ```
+
+  Restore checks the archive (readable zip, `PRAGMA integrity_check` on every database) before
+  replacing anything, and keeps the previous data next to the data dir as
+  `.pre-restore-<timestamp>`. Stop the server before restoring.
+- **Optional edit review** (`GROK_APPROVE_EDITS=on`): file edits ask for approval with a
+  unified diff before they are applied. Do not combine with unattended schedules
+  (approval=never denies every edit there).
+- **Benchmark:** `python benchmark.py` runs 10 offline tasks (turns, edits, commands, Stop
+  latency, stream cap, backup/restore, run log) and prints a table.
 
 ## Tests
 

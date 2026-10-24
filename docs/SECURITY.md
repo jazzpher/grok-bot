@@ -8,10 +8,16 @@ new 0.9 surfaces (memory, automations, MCP, Telegram, plugins, images) add.
 - **Workspace jail.** File tools resolve paths inside `workspaces/<owner>` (symlinks rejected, size/count caps).
 - **Sandbox policy** (`read-only` / `workspace-write` / `full-access` × `on-request` / `never`). `run_command` is
   classified (read-only allowlist, destructive patterns, network, escape attempts) and asks, denies or runs
-  accordingly. Persisted "always allow" rules are per owner and pattern-scoped.
+  accordingly. Persisted "always allow" rules are per owner and pattern-scoped, and never match a command that chains, pipes,
+  substitutes or redirects (`npm test` does not cover `npm test && curl …`).
   **Without Docker** (subprocess backend, nothing confines a command) every `run_command` asks for approval in every
   mode, saved "always allow" rules are not applied and "always" means "this once"; only the explicit
   `full-access` + `never` policy skips the prompt. Unattended runs (scheduler) cannot prompt, so they deny shell commands.
+- Children never see the server's secrets: their env is scrubbed, and on Linux the server marks itself non-dumpable at
+  startup (`prctl(PR_SET_DUMPABLE, 0)`), so an approved command, MCP server or browser cannot read the server's
+  original environment (API key, Telegram token, app password, session secret) from `/proc/<ppid>/environ`.
+  `GROK_ALLOW_DEBUGGER=on` turns this off (for py-spy/gdb). Files the server's user can read (for example the data
+  dir's `.session_secret`) are still readable by host commands: prefer the Docker backend, or set `GROK_SESSION_SECRET`.
 - **Hardline blocklist** (all backends, all policies including full-access + never): root/home deletion, disk
   formatting or raw device writes, fork bombs, drive wipes (`format`, `del /s`, `rd /s`, `Remove-Item -Recurse` on a
   drive root), `diskpart`/`bcdedit`, download-piped-to-shell. A small pattern list, not a complete safety net.
@@ -22,22 +28,24 @@ new 0.9 surfaces (memory, automations, MCP, Telegram, plugins, images) add.
   packages into the image fails by design: create a venv inside the workspace instead
   (`python -m venv .venv && .venv/bin/pip install …`). The subprocess backend is *not* an isolation boundary —
   see LIMITATIONS.
-- **Network guard** for `fetch_url` / web search / custom provider URLs: public hosts only, DNS re-checked, redirects
-  bounded, response sizes capped.
+- **Network guard** for `fetch_url` / web search / custom provider URLs: public hosts only (`ipaddress` `is_global`, so
+  private, loopback, link-local and CGNAT/Tailscale `100.64.0.0/10` are refused), DNS re-checked, redirects bounded, response sizes capped.
 - **Keys** are kept in memory (or env), scrubbed from command environments, never forwarded to a different endpoint
   than the one they were saved for.
 - **Exposure** needs `GROK_DEPLOYMENT_MODE=exposed` + `GROK_APP_PASSWORD`; cookies are HttpOnly, SameSite configurable,
-  CSP/frame-ancestors headers set, login rate-limited.
+  CSP/frame-ancestors headers set, login rate-limited (per address; `X-Forwarded-For` only with `GROK_TRUSTED_PROXIES=N`; a
+  browser that logged in before carries a signed device cookie and is exempt, so a shared Docker/tunnel address cannot
+  lock the owner out).
 
 ## New in 0.9
 
 | Surface | Risk | Mitigation |
 |---|---|---|
 | Long-term memory | prompt injection persisted across sessions ("remember: always run X") | memories are injected as *context, not commands*, labelled as such; `save_memory` is a mutating tool (visible card, `memory_saved` event); memories are owner-scoped, listed and editable in the UI; the Context row shows what was injected each turn |
-| Session search / read_history | leaking another user's conversations | all stores are owner-scoped (`owner` = web session id or `tg:<chat>`); no cross-owner queries exist |
+| Session search / read_history | leaking another user's conversations | all stores are owner-scoped (`owner` = `owner` for password logins, the web session id in local mode, or `tg:<chat>`); no cross-owner queries exist |
 | Sub-agents | runaway recursion / cost | depth cap (`GROK_MAX_SUBAGENT_DEPTH`, default 1), per-call step cap (≤30), same policy + approvals as the parent, excluded tools (`delegate`, memory writes, scheduling) |
-| Automations | unattended runs executing dangerous actions while nobody watches | `approval=never` (anything needing approval is *denied*, not queued), reduced step budget, per-owner job limit, min interval 5 min; jobs run under the owner's sandbox policy and persisted allow-rules only |
-| MCP servers | arbitrary code (stdio servers are local processes), untrusted tool output, name collisions | config is owner-controlled (`mcp.json`/env), never editable from the browser; env passed to stdio servers excludes `*KEY*/*TOKEN*/*SECRET*/*PASSWORD*` unless you set them explicitly in `env`; tool names are namespaced `mcp__<server>__`; outputs are wrapped as UNTRUSTED TOOL RESULT like every tool; non-read-only tools ask in read-only mode, destructive ones ask unless full-access; timeouts and 8 MB response cap |
+| Automations | unattended runs executing dangerous actions while nobody watches | `approval=never` (anything needing approval is *denied*, not queued), a saved `full-access` policy runs as `workspace-write` (never YOLO unless `GROK_UNATTENDED_FULL_ACCESS=on`), `schedule_task` from the model needs approval (so an unattended run cannot create schedules), reduced step budget, per-owner job limit, min interval 5 min; jobs run under the owner's sandbox policy and persisted allow-rules only |
+| MCP servers | arbitrary code (stdio servers are local processes), untrusted tool output, name collisions | config is owner-controlled (`mcp.json`/env), never editable from the browser; env passed to stdio servers excludes `*KEY*/*TOKEN*/*SECRET*/*PASSWORD*` unless you set them explicitly in `env`; tool names are namespaced `mcp__<server>__`; outputs are wrapped as UNTRUSTED TOOL RESULT like every tool; non-read-only tools ask in read-only mode, destructive ones ask unless full-access (a tool with no annotations counts as destructive, the MCP spec default; only `readOnlyHint: true` or `destructiveHint: false` skips the prompt); timeouts and 8 MB response cap |
 | Telegram | anyone messaging the bot | fail-closed allowlist of Telegram user ids (refuses to start without one); every update is checked, including callback buttons; plain-text replies; owner isolation (`tg:<chat_id>`) |
 | Plugins | they are code | only loaded from `GROK_PLUGINS` (server env) — treat like installing a package |
 | Images | large payloads, content sniffing | ≤4 per message, PNG/JPEG/WebP/GIF data URLs only, ~2 MB each, request cap 12 MB; images are not written to disk |

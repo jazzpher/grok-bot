@@ -77,7 +77,7 @@ def register(registry):
         ctx.emit({'type': 'command_start', 'command': command, 'description': description, 'backend': backend.name})
         try:
             result = backend.run(command, ctx.workspace.root, timeout, network=policy.network or policy.mode == 'full-access',
-                                 read_only=policy.mode == 'read-only')
+                                 read_only=policy.mode == 'read-only', stop=getattr(ctx, 'stop', None))
         except RuntimeError as exc:
             raise ToolError(str(exc)) from exc
         except OSError as exc:

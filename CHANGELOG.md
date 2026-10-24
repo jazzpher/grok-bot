@@ -4,6 +4,34 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Reliability pack: real cancellation, per-run log, backup/restore, optional edit review.
+
+### Added
+
+- **Reliable cancellation.** Stop now interrupts a hung provider stream and a running shell
+  command within about a second: a watchdog shuts the socket down (close alone does not wake a
+  blocked read on Linux), and both sandbox backends poll the stop event and kill the process
+  group / container. A stopped command renders as `STOPPED by user`.
+- **Hard total cap on provider streams** (`GROK_STREAM_TIMEOUT`, default 600s). The per-read
+  timeout could not bound a provider that keeps dribbling bytes; the stream now aborts with a
+  clear error when the wall-clock cap passes.
+- **Per-run log.** Every turn (web, CLI, Telegram, scheduled) appends one JSON line to
+  `.runlog.jsonl` in the data directory: run id, source, model, goal, start/end, status,
+  duration, steps, every tool call with ok/duration/error, usage, and the turn's final error.
+  Rotated by size. `grokbot runs` prints it; `GET /runs` serves it as JSON.
+- **Backup and restore.** `grokbot backup --out file.zip` snapshots the data directory
+  (SQLite stores through the backup API, so it is consistent while the server runs);
+  `grokbot restore --from file.zip` verifies the archive first (zip readable, every database
+  passes `PRAGMA integrity_check`, no path traversal) and keeps the previous data at
+  `<dir>.pre-restore-<timestamp>` instead of deleting it.
+- **Optional edit review** (`GROK_APPROVE_EDITS=on`): write_file / edit_file / copy_file /
+  write_docx ask for approval with a unified diff of the proposed change. Do not combine with
+  unattended schedules (their approval=never would deny every edit).
+- **benchmark.py**: 10 offline tasks (plain turns, file edits, commands, Stop latency, stream
+  cap, backup/restore, run log) for before/after comparisons.
+
 ## [0.9.3] - 2026-10-18
 
 ### Added

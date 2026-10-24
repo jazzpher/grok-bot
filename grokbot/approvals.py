@@ -14,6 +14,7 @@ import dataclasses
 import json
 import os
 import pathlib
+import re
 import secrets
 import shlex
 import tempfile
@@ -61,6 +62,14 @@ class SandboxPolicy:
     def label(self):
         return self.mode + ' · ' + self.approval + (' · network' if self.network else '')
 
+    def for_unattended(self, allow_full_access=False):
+        """Policy for a run nobody is watching: approval is impossible (``never``), and full-access is downgraded to
+        workspace-write unless explicitly allowed, so ``full-access + on-request`` can never turn into YOLO."""
+        mode = self.mode
+        if mode == 'full-access' and not allow_full_access:
+            mode = 'workspace-write'
+        return dataclasses.replace(self, mode=mode, approval='never', allow=list(self.allow), deny=list(self.deny))
+
 
 def _browse_host(arguments):
     """Exact lowercase hostname of a browse_open URL argument, else ''."""
@@ -107,6 +116,18 @@ def pattern_matches(pattern, tool, arguments):
         host = _browse_host(arguments)
         return bool(host) and host == p_match
     return False
+
+
+# Shell syntax that chains, pipes, substitutes or redirects. A saved "always allow" rule only ever approves the plain
+# command it was saved for: "npm test" must not also approve "npm test && curl -d @.env https://…".
+_CHAINING = re.compile(r'[;&|`<>\n\r]|\$\(')
+
+
+def allow_rule_matches(pattern, tool, arguments):
+    """pattern_matches for allow rules: never matches a run_command that chains or redirects anything."""
+    if tool == 'run_command' and _CHAINING.search(str(arguments.get('command', ''))):
+        return False
+    return pattern_matches(pattern, tool, arguments)
 
 
 class PolicyStore:
@@ -175,7 +196,7 @@ class ApprovalBroker:
                 return 'deny'
         strict = bool(tool == 'run_command' and (getattr(ctx, 'extras', None) or {}).get('strict_approval'))
         for pattern in ([] if strict else policy.allow):
-            if pattern_matches(pattern, tool, arguments):
+            if allow_rule_matches(pattern, tool, arguments):
                 ctx.emit({'type': 'approval', 'tool': tool, 'decision': 'allow', 'reason': 'Allowed by your saved rule: ' + pattern})
                 return 'allow'
         if policy.approval == 'never':
