@@ -10,7 +10,10 @@ Deliberately separate from the public-web browser tools (browser_tools.py):
 * The page's own network is confined the same way: a route guard allows
   requests only to the preview server itself plus inline data:/blob:/about:
   URLs. ``file://``, other loopback ports, LAN hosts and the public internet
-  are all aborted, per request (including each redirect hop).
+  are all aborted before they are sent. Redirect hops are *not* seen by the
+  guard (Playwright does not route them); that is safe here only because the
+  sole server a request can reach is the preview server, which never answers
+  3xx. If it ever redirects, a hop elsewhere would be requested unchecked.
 * Chromium starts on the first preview of a turn and is killed when the turn
   ends (the agent loop closes the session in its ``finally``). One browser,
   headless; each capture uses a fresh browser context so no state carries over.
@@ -92,7 +95,9 @@ _SAFE_INLINE = ('data', 'blob', 'about')
 
 
 def request_allowed(url, port):
-    """Route-guard decision for one page request (navigation, subresource, redirect hop)."""
+    """Route-guard decision for one page request (navigation or subresource).
+
+    Redirect hops never reach this function: Playwright does not route them."""
     scheme = urllib.parse.urlparse(url).scheme.lower()
     if scheme in _SAFE_INLINE:
         return True
@@ -147,8 +152,8 @@ class _PreviewHandler(http.server.SimpleHTTPRequestHandler):
         if target is None:
             self.send_error(403)
             return
-        if target.is_dir():
-            target = target / 'index.html'
+        if target.is_dir():                               # served in place, never a 3xx: the
+            target = target / 'index.html'                # route guard cannot see redirect hops
         if target.is_symlink() or not target.is_file():
             self.send_error(404)
             return
