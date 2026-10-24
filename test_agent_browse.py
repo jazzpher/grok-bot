@@ -290,7 +290,8 @@ class LiveChromiumTests(unittest.TestCase):
     """Real Playwright pass against a local server, reached through a fake PUBLIC hostname
     (Chromium --host-resolver-rules maps it to 127.0.0.1; Python DNS is patched to return a
     public IP so the netguard sees a public site). Proves open/see/scroll/click, the
-    netguard denials, redirect-hop blocking and the cross-domain approval wall."""
+    netguard denials, that a page redirected to loopback is blanked and refused (the hop itself is NOT blocked)
+    and the cross-domain approval wall."""
 
     A = 'site-a.test'
     B = 'site-b.test'
@@ -359,7 +360,10 @@ class LiveChromiumTests(unittest.TestCase):
         state = self.session.open(self.base_b + '/other', approved)
         self.assertEqual(state['snapshot']['title'], 'Other site')
 
-    def test_redirect_to_loopback_aborted(self):
+    def test_redirect_to_loopback_page_is_blanked(self):
+        # Known gap: Playwright does not route redirect hops, so the 302 to 127.0.0.1 IS requested (the local
+        # server sees it). What this proves is the after-the-fact check: the landed page is blanked and the
+        # tool refuses with BrowserError, so nothing from it reaches the model. Blocking the hop needs a proxy.
         approved = {self.A}
         self.session.open(self.base_a + '/', approved)
         with self.assertRaises(BrowserError):

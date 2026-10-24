@@ -12,14 +12,24 @@ Deliberately separate from both existing browser surfaces:
 This module reaches the PUBLIC web, so the rules are different:
 
 * Off by default (``GROK_AGENT_BROWSER=on``).
-* Every request (navigation, subresource, each redirect hop) is vetted by the
-  public netguard (``browser_tools.request_allowed``): http/https only, no
-  userinfo, no private/loopback/LAN/reserved targets after DNS resolution.
+* Every request Playwright routes (top-level navigation, subresource,
+  WebSocket) is vetted by the public netguard (``browser_tools.request_allowed``)
+  before it is sent: http/https only, no userinfo, no private/loopback/LAN/
+  reserved targets after the netguard's own DNS resolution.
+* NOT covered: redirect hops. Playwright does not route them, so a 3xx from a
+  public or approved page to loopback, the LAN or an unapproved host is still
+  requested by Chromium; only the page it finally lands on is checked
+  afterwards (``_verify_location``), blanked and refused - its content never
+  reaches the model, but the request itself has already been sent. The
+  netguard's DNS lookup is also separate from Chromium's, so DNS rebinding is
+  left to Chromium's own local-network checks. Closing both needs a vetting
+  proxy; until then keep GROK_AGENT_BROWSER off except on a trusted machine.
 * Domain approval: the first ``browse_open`` to a hostname pauses for the
   user's approval (per-domain "always" rules are saved; a one-time allow covers
-  that host for the rest of the turn). If a click or redirect lands the page on
-  a host that was never approved, the page is blanked and the tool errors out;
-  the agent must call browse_open for the new domain, which asks again.
+  that host for the rest of the turn). A top-level navigation (e.g. a click) to
+  a host that was never approved is refused before it is sent; if a redirect
+  lands the page on one, the page is blanked and the tool errors out. Either
+  way the agent must call browse_open for the new domain, which asks again.
   Subresources (images, scripts, CDN calls) are vetted by the netguard only -
   approving a domain approves the document, not every host the page phones.
 * No typing: there is no browse_type. The agent can read pages and click

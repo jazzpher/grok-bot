@@ -62,6 +62,10 @@
   with click-only. The 8-action cap per turn bounds long research sessions. Domain approval covers the top-level
   document; subresource hosts are netguard-checked but not individually approved. Live-tested on Linux Chromium
   only - Windows/macOS and real-model end-to-end runs are untested.
+- **Keep `GROK_AGENT_BROWSER` off except on a trusted machine until a proxy-based fix lands.** Redirect hops are
+  not vetted (Playwright does not route them): a page that redirects to `127.0.0.1`, a LAN address or an
+  unapproved host still gets that request sent, and the page is only blanked after it lands. DNS rebinding is left
+  to Chromium's own local-network checks. Both need a vetting proxy in front of Chromium.
 - **Preview is render-only, single page, per turn.** `preview_page` (`GROK_PREVIEW=on`) screenshots workspace
   HTML for the interactive agent: no clicking/typing/scrolling, one page per call (desktop or mobile viewport),
   screenshots are clipped at 2000px height and capped at 3 previews per turn, and the image only helps when the
