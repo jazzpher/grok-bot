@@ -10,7 +10,9 @@ browser ──POST /agent (NDJSON)──▶ webui.py ──▶ grokbot.agent.run
 ```
 
 ## One turn (`grokbot/agent.py`)
-1. Build the system prompt: identity + environment block (sandbox mode, approval policy, backend, cwd, model) +
+1. Build the system prompt: identity + working rules + environment block (sandbox mode, approval policy, backend, cwd, model) +
+   the persona section (`GROK_PERSONA=friend`, default; `tool` = original prompt; sub-agents always `tool`) +
+   the memory rule (when memory tools are available) +
    project instructions (`AGENTS.md`/`GROKBOT.md`/`CLAUDE.md` in the workspace) + skills index + (JSON mode only)
    the tool protocol.
 2. Compact the history if `estimate_tokens(messages) > COMPACT_RATIO × context_tokens` — model summary first,
