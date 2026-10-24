@@ -10,6 +10,16 @@ Reliability pack: real cancellation, per-run log, backup/restore, optional edit 
 
 ### Added
 
+- **Friend persona** (`GROK_PERSONA=friend`, the default). The chat voice is now short,
+  warm and mirrors the user's language and register (Taglish in, Taglish out), with no stock
+  filler, at most one clarifying question, opinions when asked, plain admissions of mistakes and
+  a one-line heads-up before long tool work; coding answers stay precise. `GROK_PERSONA=tool`
+  keeps the original prompt byte for byte; sub-agents always use it. Safety and approval rules
+  are unchanged in both.
+- **Memory guidance in the prompt.** When memory tools are available the system prompt now says
+  what personal facts to save (and what never to save), to replace facts that change, and to use
+  memories naturally rather than reciting them. `MemoryStore.relevant` tops up with up to 4 of
+  the newest notes so a greeting that matches no keyword still carries the basics.
 - **Reliable cancellation.** Stop now interrupts a hung provider stream and a running shell
   command within about a second: a watchdog shuts the socket down (close alone does not wake a
   blocked read on Linux), and both sandbox backends poll the stop event and kill the process

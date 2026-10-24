@@ -52,6 +52,8 @@ DEFAULT_CONTEXT_TOKENS = _int('GROK_CONTEXT_TOKENS', 128000, 4000)
 COMPACT_RATIO = 0.70          # summarize when estimated tokens exceed this share of the window
 KEEP_RECENT_MESSAGES = 8      # always keep the newest messages verbatim after compaction
 TOOL_MODE = _choice('GROK_TOOL_MODE', 'auto', ('auto', 'native', 'json'))
+# Chat voice: 'friend' (short, warm, mirrors the user's language) or 'tool' (the original terse coding-agent voice)
+PERSONA = _choice('GROK_PERSONA', 'friend', ('friend', 'tool'))
 
 # Provider stream
 # Hard wall-clock cap for ONE streaming provider response. The per-read timeout in
