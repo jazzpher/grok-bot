@@ -161,7 +161,7 @@
       </div>
       <div id="advanced" hidden>
         <label class="check"><input type="checkbox" id="background"> Run as durable background task (legacy harness: survives restarts, JSON tool protocol, explicit checks)</label>
-        <input id="checks" aria-label="Artifact checks JSON" placeholder='Checks JSON (background tasks): [{"type":"file_text","path":"out.txt","text":"hello"}]'>
+        <input id="checks" aria-label="Artifact checks JSON" placeholder='Checks JSON: [{"type":"file_text","path":"out.txt","text":"hello"}] or [{"type":"command","command":"python3 test_out.py"}] or [{"type":"pixel_diff","path":"out.png","source_path":"truth.png","max_diff":0.01}]'>
         <input id="requirements" aria-label="Generation requirements" placeholder="Generation requirements: language, format, content, tone (optional)">
         <div class="muted">Background results are verified only by the explicit checks; language, content and style are not independently verified.</div>
       </div>

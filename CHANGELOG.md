@@ -6,9 +6,29 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Reliability pack: real cancellation, per-run log, backup/restore, optional edit review.
+Verifiable agent loops: pixel-diff and command verifiers gate task completion.
 
 ### Added
+
+- **Verifiable agent loops.** The durable harness gates `done` on two new deterministic
+  check types alongside `file_text`/`exact_copy`: `pixel_diff` (Pillow pixel comparison of
+  an output image or headlessly rendered HTML page against a ground-truth image; numeric
+  `max_diff` threshold, per-channel `tolerance`, up to 8 `ignore` rectangles, and a `note`
+  field documenting known-irrelevant exemptions; highlighted diff saved as `<name>.diff.png`)
+  and `command` (owner-supplied acceptance command - tests pass, output matches - run on the
+  configured sandbox backend with network disabled; hardline-blocked commands refused at
+  submit). A failed check rejects `done` with the measured numbers, so the agent fixes the
+  artifact and retries within its step budget instead of declaring success on a feeling.
+- **`verify_visual` tool** for the interactive agent: the same deterministic pixel diff
+  (workspace image or rendered `.html` output vs a ground-truth image, rendered `.html`, or
+  public URL through the existing GROK_PREVIEW / GROK_BROWSER_ENABLED machinery), returning
+  the mismatch percent and saving a highlighted diff image next to the output.
+- Pillow (`pillow>=10.0`) is now a dependency; image sides need nothing else, HTML rendering
+  uses the existing Playwright setup.
+
+### Added (earlier, same unreleased cycle)
+
+Reliability pack: real cancellation, per-run log, backup/restore, optional edit review.
 
 - **Reliable cancellation.** Stop now interrupts a hung provider stream and a running shell
   command within about a second: a watchdog shuts the socket down (close alone does not wake a

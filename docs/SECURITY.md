@@ -21,6 +21,11 @@ new 0.9 surfaces (memory, automations, MCP, Telegram, plugins, images) add.
 - **Hardline blocklist** (all backends, all policies including full-access + never): root/home deletion, disk
   formatting or raw device writes, fork bombs, drive wipes (`format`, `del /s`, `rd /s`, `Remove-Item -Recurse` on a
   drive root), `diskpart`/`bcdedit`, download-piped-to-shell. A small pattern list, not a complete safety net.
+- **Background-task `command` checks** run an owner-supplied command at done-time without a per-command prompt:
+  checks come from the owner (checks JSON or Resume), never from the model, are immutable once set, run on the
+  configured sandbox backend with network disabled, and pass the same hardline blocklist at submit. On the
+  subprocess backend they share that backend's limits: not an isolation boundary, so treat check commands with
+  the same care as an approved `run_command`.
 - **Docker backend** (`GROK_SANDBOX_BACKEND=docker`): commands run in a throwaway container with the workspace
   bind-mounted, no network unless the policy says so, a **read-only root filesystem** and a single writable tmpfs at
   `/tmp` (which is also `HOME`/`TMPDIR`, 256 MB, `nosuid`). `--cap-drop ALL`, `no-new-privileges`, `--pids-limit`,

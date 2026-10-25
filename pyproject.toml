@@ -15,6 +15,7 @@ dependencies = [
   "flask",
   "pypdf>=6.0,<7",
   "defusedxml>=0.7,<1",
+  "pillow>=10.0",
 ]
 
 [project.scripts]
