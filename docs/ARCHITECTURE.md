@@ -30,7 +30,13 @@ browser ──POST /agent (NDJSON)──▶ webui.py ──▶ grokbot.agent.run
 Each tool is a `ToolSpec` (name, description, JSON-schema parameters, handler, `mutates`, `needs_approval`,
 `available`). `default_registry()` registers: files (`read_file`, `write_file`, `edit_file`, `list_files`, `glob`,
 `grep`, `copy_file`, `compare_files`, `write_docx`, `delete_file`), misc (`calculate`, `current_time`), skills
-(`list_skills`, `read_skill`, `save_skill`), shell (`run_command`), web (`fetch_url`, `web_search`). File tools reuse
+(`list_skills`, `read_skill`, `save_skill`), shell (`run_command`), web (`fetch_url`, `web_search`), verify
+(`verify_visual` — deterministic Pillow pixel diff of an output image/HTML render against a ground-truth
+image, HTML render or public URL; mismatch percent plus a highlighted `<name>.diff.png`).
+The durable harness enforces the same idea at done-time: besides `file_text`/`exact_copy`, checks can be
+`pixel_diff` (same diff engine, numeric `max_diff`/`tolerance`/`ignore` + documented `note` exemptions) or
+`command` (owner-supplied command on the sandbox backend, network off, hardline list applied at submit).
+`done` is rejected with the measured numbers until every check passes. File tools reuse
 `agent_loop.Workspace` for path/size/count guards, so the old protections stay in force.
 
 ## Sandbox & approvals (`sandbox.py`, `approvals.py`)

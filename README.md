@@ -177,6 +177,22 @@ Example: "Calculate 17 x 23, save the result in answer.txt, and read it back
 to check it." Supply checks JSON `[{"type":"file_text","path":"answer.txt","text":"391"}]`.
 Click Workspace files to download the result.
 
+**Verifiable agent loops.** Beyond byte checks, background tasks accept two more
+deterministic verifiers, so the agent cannot declare done on a feeling: it
+iterates until the measured numbers pass. `pixel_diff` compares an output image
+(or a headlessly rendered HTML page) against a ground-truth screenshot and
+passes when the mismatch ratio is within `max_diff` (default 1%); the
+highlighted diff is saved as `<name>.diff.png`. `command` runs an owner-supplied
+command in the workspace (tests pass, output matches) with network disabled and
+hardline-blocked commands refused at submit. Known-irrelevant differences are
+handled with numbers, not vibes: a looser `max_diff`, a per-channel `tolerance`,
+or `ignore` rectangles, each with a `note` documenting the exemption. The
+interactive agent gets the same verifier as the `verify_visual` tool (Pillow
+pixel diff; HTML/URL sides rendered through the existing GROK_PREVIEW /
+GROK_BROWSER_ENABLED machinery). Example:
+`[{"type":"pixel_diff","path":"page.html","source_path":"figma.png","max_diff":0.02,"tolerance":8,"note":"font antialiasing"}]`
+or `[{"type":"command","command":"python3 test_out.py","expect_exit":0}]`.
+
 The section above describes the durable background harness. The interactive agent
 can additionally run shell commands (under the sandbox policy), fetch pages and
 search the web. It still cannot send messages, buy things, or reach files outside its

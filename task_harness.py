@@ -21,6 +21,9 @@ from agent_loop import RULES, ACTION_FIELDS, Workspace, ToolError, is_upload_pat
 
 MAX_SCHEMA_REJECTS = 3
 MAX_SELF_VERIFY = 1  # one autonomous self-verification round before done is accepted
+CHECK_TYPES = ('file_text', 'exact_copy', 'pixel_diff', 'command')
+CHECK_COMMAND_TIMEOUT = (5, 120)      # seconds, min/max for command checks
+CHECK_NOTE_MAX = 300
 
 ACTIVE = ('queued', 'running')
 RESUMABLE = ('stopped', 'interrupted', 'needs_input', 'blocked')
@@ -215,18 +218,73 @@ class TaskManager:
         if not isinstance(checks, list) or len(checks) > 8:
             raise ValueError('Supply up to eight explicit checks.')
         for c in checks:
-            if not isinstance(c, dict) or c.get('type') not in ('file_text', 'exact_copy'):
-                raise ValueError('Supported checks: file_text and exact_copy; semantic criteria need clarification.')
+            if not isinstance(c, dict) or c.get('type') not in CHECK_TYPES:
+                raise ValueError('Supported checks: file_text, exact_copy, pixel_diff and command; '
+                                 'semantic criteria need clarification.')
+            if c['type'] == 'command':
+                self._validate_command_check(c)
+                continue
             workspace.path(c.get('path'))
             if c['type'] == 'file_text':
                 if not isinstance(c.get('text'), str) or len(c['text'].encode('utf-8')) > 32000:
                     raise ValueError('file_text requires expected UTF-8 text up to 32 KB.')
+            elif c['type'] == 'pixel_diff':
+                self._validate_pixel_check(c, workspace)
             else:
                 source = workspace.path(c.get('source_path'))
                 target = workspace.path(c['path'])
                 if (source == target or is_upload_path(c['path'])
                         or is_upload_path(target.relative_to(workspace.root))):
                     raise ValueError('Copy target must be separate and writable.')
+
+    @staticmethod
+    def _validate_command_check(c):
+        command = c.get('command')
+        if not isinstance(command, str) or not 1 <= len(command) <= 500:
+            raise ValueError('command checks require a command string up to 500 characters.')
+        from grokbot.sandbox import hardline_reason
+        reason = hardline_reason(command)
+        if reason:
+            raise ValueError('command check refused. ' + reason)
+        expect_exit = c.setdefault('expect_exit', 0)
+        if isinstance(expect_exit, bool) or type(expect_exit) is not int or not 0 <= expect_exit <= 255:
+            raise ValueError('expect_exit must be an integer from 0 to 255.')
+        expect_output = c.get('expect_output')
+        if expect_output is not None and (not isinstance(expect_output, str) or len(expect_output) > 1000):
+            raise ValueError('expect_output must be text up to 1000 characters.')
+        timeout = c.setdefault('timeout', 60)
+        if isinstance(timeout, bool) or type(timeout) is not int or not CHECK_COMMAND_TIMEOUT[0] <= timeout <= CHECK_COMMAND_TIMEOUT[1]:
+            raise ValueError('command timeout must be an integer from %d to %d seconds.' % CHECK_COMMAND_TIMEOUT)
+        TaskManager._validate_note(c)
+
+    @staticmethod
+    def _validate_pixel_check(c, workspace):
+        from grokbot.visual import HTML_SUFFIXES, IMAGE_SUFFIXES, VisualVerifyError, validate_ignore, validate_threshold, validate_tolerance
+        kinds = ', '.join(sorted(IMAGE_SUFFIXES)) + ' or ' + '/'.join(sorted(HTML_SUFFIXES))
+        for key in ('path', 'source_path'):
+            value = c.get(key)
+            if not isinstance(value, str) or pathlib.PurePath(value).suffix.lower() not in IMAGE_SUFFIXES | HTML_SUFFIXES:
+                raise ValueError('pixel_diff requires %s to be an image (%s); HTML is rendered headlessly first.' % (key, kinds))
+        if workspace.path(c['path']) == workspace.path(c['source_path']):
+            raise ValueError('pixel_diff needs separate output and ground-truth paths.')
+        if is_upload_path(c['path']):
+            raise ValueError('pixel_diff output must be writable, not an upload.')
+        try:
+            c['max_diff'] = validate_threshold(c.get('max_diff', 0.01), name='max_diff')
+            c['tolerance'] = validate_tolerance(c.get('tolerance', 0))
+            c['ignore'] = validate_ignore(c.get('ignore'))
+        except VisualVerifyError as exc:
+            raise ValueError(str(exc)) from exc
+        viewport = c.setdefault('viewport', 'desktop')
+        if viewport not in ('desktop', 'mobile'):
+            raise ValueError('viewport must be desktop or mobile.')
+        TaskManager._validate_note(c)
+
+    @staticmethod
+    def _validate_note(c):
+        note = c.get('note')
+        if note is not None and (not isinstance(note, str) or len(note) > CHECK_NOTE_MAX):
+            raise ValueError('check notes (documented exemptions) must be text up to %d characters.' % CHECK_NOTE_MAX)
 
     def submit(self, owner, goal, history, call_model, checks=None, budgets=None, requirements='', result_schema=None):
         if result_schema is not None:
@@ -363,6 +421,103 @@ class TaskManager:
         state['messages'].append({'role': 'user', 'content': 'Interrupted action reconciled from current artifact. No action replayed. Read and verify output again.'})
         self.save(tid, 'running', state, {'type': 'reconciled', 'text': 'Recovered interrupted action without replay.'})
 
+    def _verify_command(self, c, workspace, stop=None):
+        """Run an owner-supplied acceptance command (tests pass, output matches).
+
+        Checks come from the owner, not the model, and hardline-blocked commands
+        are rejected at submit; they run without a per-command approval prompt on
+        the configured sandbox backend (subprocess fallback), network disabled."""
+        from grokbot import sandbox as _sandbox
+        backend = _sandbox.get_backend()
+        if backend is None or not backend.available():
+            backend = _sandbox.SubprocessBackend()
+        if not backend.available():
+            return 'blocked', 'Command checks need a command backend, but none is available on this host.'
+        timeout = c.get('timeout', 60)
+        try:
+            result = backend.run(c['command'], workspace.root, timeout, network=False, stop=stop)
+        except Exception as exc:
+            return 'blocked', 'Command check could not run (%s).' % type(exc).__name__
+        note = (' Note: ' + c['note']) if c.get('note') else ''
+        if result.stopped:
+            return 'check', 'Command check interrupted by stop.'
+        out = (result.stdout + '\n' + result.stderr).strip()
+        tail = out[-800:] if out else '(no output)'
+        if result.timed_out or result.exit_code is None:
+            return 'check', ('Command check timed out after %ds: `%s`. Make the artifact pass within '
+                             'the timeout, then call done again.%s' % (timeout, c['command'], note))
+        expect_exit = c.get('expect_exit', 0)
+        if result.exit_code != expect_exit:
+            return 'check', ('Command check failed: `%s` exited %s (expected %d). Output tail:\n%s\n'
+                             'Fix the artifact and call done again.%s'
+                             % (c['command'], result.exit_code, expect_exit, tail, note))
+        expect_output = c.get('expect_output')
+        if expect_output is not None and expect_output not in out:
+            return 'check', ('Command check failed: `%s` output did not contain %r. Output tail:\n%s\n'
+                             'Fix the artifact and call done again.%s' % (c['command'], expect_output, tail, note))
+        return 'ok', 'Command check passed: `%s` exited %d.' % (c['command'], expect_exit)
+
+    def _verify_pixel_diff(self, c, workspace):
+        """Deterministic pixel diff between an output artifact and a ground truth.
+
+        A .html/.htm side is rendered headlessly first (needs GROK_PREVIEW=on);
+        image sides are compared directly. The highlighted diff lands next to
+        the output as <name>.diff.png."""
+        from grokbot import config as _gconfig
+        from grokbot.visual import MAX_IMAGE_BYTES, VisualVerifyError, diff_images, is_html_name
+
+        def side(rel, label):
+            path = workspace.path(rel)
+            if is_html_name(rel):
+                if not _gconfig.PREVIEW_ENABLED:
+                    raise VisualVerifyError('rendering HTML needs GROK_PREVIEW=on')
+                if not path.is_file():
+                    raise VisualVerifyError('HTML file missing: ' + label)
+                from grokbot.preview import PreviewError, PreviewSession
+                session = PreviewSession(workspace.root)
+                try:
+                    return session.capture(path.relative_to(workspace.root).as_posix(),
+                                           c.get('viewport', 'desktop'))['image'][0]
+                except PreviewError as exc:
+                    raise VisualVerifyError(str(exc)) from exc
+                finally:
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
+            if not path.is_file() or path.stat().st_size > MAX_IMAGE_BYTES:
+                raise VisualVerifyError('image missing or exceeds the %d MB limit: %s'
+                                        % (MAX_IMAGE_BYTES // (1024 * 1024), label))
+            return path.read_bytes()
+
+        try:
+            out_bytes = side(c['path'], c['path'])
+            truth_bytes = side(c['source_path'], c['source_path'])
+            diff_rel = c['path'].rsplit('.', 1)[0] + '.diff.png'
+            result = diff_images(truth_bytes, out_bytes, tolerance=c.get('tolerance', 0),
+                                 ignore=c.get('ignore'), diff_path=workspace.path(diff_rel))
+        except VisualVerifyError as exc:
+            text = str(exc)
+            if 'GROK_PREVIEW' in text or 'Pillow' in text or 'Playwright' in text:
+                return 'blocked', ('Pixel-diff check cannot run: ' + text + '. Install the verifier '
+                                   '(pip install pillow; HTML sides also need GROK_PREVIEW=on and Playwright), '
+                                   'then resume.')
+            return 'check', 'Artifact verification could not run: ' + text
+        max_diff = c.get('max_diff', 0.01)
+        note = (' Known-irrelevant differences per task note: ' + c['note']) if c.get('note') else ''
+        if result['mismatch_ratio'] <= max_diff:
+            return 'ok', ('Pixel-diff check passed: %s matches %s within %.4f%% (mismatch %.4f%%, '
+                          '%d of %d pixels).%s' % (c['path'], c['source_path'], max_diff * 100,
+                                                   result['mismatch_percent'], result['different_pixels'],
+                                                   result['compared_pixels'], note))
+        return 'check', ('Artifact verification failed: %s differs from ground truth %s: %.4f%% mismatch '
+                         'exceeds the allowed %.4f%% (%d of %d pixels differ, sizes %s vs %s). Highlighted '
+                         'diff saved: %s (red pixels differ). Fix the artifact and call done again.%s'
+                         % (c['path'], c['source_path'], result['mismatch_percent'], max_diff * 100,
+                            result['different_pixels'], result['compared_pixels'],
+                            'x'.join(map(str, result['output_size'])),
+                            'x'.join(map(str, result['ground_truth_size'])), diff_rel, note))
+
     @staticmethod
     def _check_result_schema(state, result):
         """Required-field check against the task's result schema, key matching
@@ -382,7 +537,8 @@ class TaskManager:
         if not row['checks']:
             # Preview screenshots are verification aids, not user artifacts.
             docs = sorted(n for n in workspace.written
-                          if not (n.lower().endswith('.preview.png') or n.lower().endswith('.browse.png')))
+                          if not (n.lower().endswith('.preview.png') or n.lower().endswith('.browse.png')
+                                  or n.lower().endswith('.diff.png')))
             if docs and all(n.lower().endswith('.docx') for n in docs) and not workspace.written - workspace.checked:
                 # Built-in check for Word output: each saved file must reopen as DOCX with text.
                 for n in docs:
@@ -395,7 +551,7 @@ class TaskManager:
                 return 'completed', 'Word document(s) reopened as DOCX with text present: ' + ', '.join(docs) + '. Only that was verified; language, content and style were not independently checked, so review the download.'
             if gate:
                 return 'needs_input', ('No deterministic acceptance checks supplied; learned skills require '
-                    'verified task artifacts (file_text or exact_copy checks, or the built-in Word check).')
+                    'verified task artifacts (file_text, exact_copy, pixel_diff or command checks, or the built-in Word check).')
             rounds = state.get('self_verify', 0)
             if docs and rounds < MAX_SELF_VERIFY:
                 # No user prompt: the task assistant verifies its own output.
@@ -417,7 +573,20 @@ class TaskManager:
                     'Fix or restate the goal, then resume.')
             return 'completed_unverified', ('Answer delivered directly (no file artifacts). Content was not independently verified; '
                 'it reflects the task assistant\'s own review of the goal.')
+        passed = []
         for c in row['checks']:
+            if c['type'] == 'command':
+                status, text = self._verify_command(c, workspace, stop=self.stops.get(row['id']))
+                if status != 'ok':
+                    return status, text
+                passed.append(text)
+                continue
+            if c['type'] == 'pixel_diff':
+                status, text = self._verify_pixel_diff(c, workspace)
+                if status != 'ok':
+                    return status, text
+                passed.append(text)
+                continue
             p = workspace.path(c['path'])
             if not p.is_file() or p.stat().st_size > 32000:
                 return 'check', 'Expected artifact missing or oversized: ' + c['path']
@@ -437,7 +606,11 @@ class TaskManager:
                 expected = s.read_bytes()
             if p.read_bytes() != expected:
                 return 'check', 'Artifact verification failed: ' + c['path']
-        return 'completed', 'Explicit artifact checks passed: ' + json.dumps(row['checks'], ensure_ascii=False) + '. Only these checks were verified; language, style, relevance and factual quality are not independently verified.'
+        detail = (' ' + ' '.join(passed)) if passed else ''
+        return 'completed', ('Explicit artifact checks passed: ' + json.dumps(row['checks'], ensure_ascii=False)
+                             + '.' + detail
+                             + ' Only these checks were verified; language, style, relevance and factual '
+                             'quality are not independently verified.')
 
     def _run(self, tid, owner, call_model):
         row = self.get(tid, owner)

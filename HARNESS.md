@@ -21,8 +21,23 @@ the checks JSON field, for example:
 [{"type":"file_text","path":"answer.txt","text":"391"}]
 ```
 
-Only `file_text` (exact UTF-8 bytes for text files; exact extracted text for DOCX) and `exact_copy` (`source_path`, `path`, current
-bounded byte equality) are supported. Unsupported check types return 400. Without
+Four deterministic check types are supported:
+
+- `file_text` (`path`, `text`): exact UTF-8 bytes for text files; exact extracted text for DOCX.
+- `exact_copy` (`source_path`, `path`): bounded byte equality.
+- `pixel_diff` (`path`, `source_path`, optional `max_diff` default 0.01, `tolerance` 0-255,
+  `ignore` up to 8 `[x,y,w,h]` rectangles, `viewport`, `note`): the output is pixel-compared
+  against a ground-truth image with Pillow and passes when the mismatch ratio is at most
+  `max_diff`. An `.html` side is rendered headlessly first (needs `GROK_PREVIEW=on` and
+  Playwright). The highlighted diff is saved next to the output as `<name>.diff.png`.
+- `command` (`command`, optional `expect_exit` default 0, `expect_output` substring,
+  `timeout` 5-120s default 60, `note`): runs the owner-supplied command in the workspace on
+  the configured sandbox backend with network disabled; passes on the expected exit code and
+  substring. Hardline-blocked commands are refused at submit, the same as run_command.
+
+A `note` on any check documents a known-irrelevant difference (an exemption, e.g. font
+rendering); it is echoed in verification messages and never lowers a threshold by itself.
+Unsupported check types return 400. Without
 an explicit check a proposed completion becomes `needs_input`, not a claim of
 success. If the original checks are empty, enter nonempty checks JSON and click
 Resume to establish the contract once. Checks are validated exactly as at admission
