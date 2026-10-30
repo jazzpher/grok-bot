@@ -169,4 +169,4 @@ a local-provider preset, images, skills export/import, and the new web UI.
 ## [0.8.x] - 2026-10-12 … 2026-10-16
 
 Model catalog discovery, provider pickers and manual fallback, durable background tasks
-with explicit artifact checks and resume, document/PDF/DOCX tooling. 
+with explicit artifact checks and resume, document/PDF/DOCX tooling.
