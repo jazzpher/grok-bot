@@ -137,17 +137,25 @@ class MemoryStore:
 
     @staticmethod
     def _current_clause(alias='m'):
-        """SQL fragment: row <alias> is current at :now. See module docstring for the three rules."""
+        """SQL fragment: row <alias> is current at :now. See module docstring for the three rules.
+        Rule 3 only relates fully-keyed rows (keyless/partial-key facts never hide each other), and
+        still applies when the later-effective row was itself superseded, so a stale backdated fact
+        cannot resurface after its newer fact is replaced."""
         a = alias
         same_key = ' AND '.join('(y.{c} = {a}.{c} OR (y.{c} IS NULL AND {a}.{c} IS NULL))'.format(a=a, c=c)
                                 for c in ('subject', 'environment', 'attribute'))
         return ('{a}.effective_from <= :now'
                 ' AND NOT ({a}.superseded_by IS NOT NULL AND (SELECT s.effective_from FROM memories s'
                 '           WHERE s.id = {a}.superseded_by) <= :now)'
-                ' AND NOT EXISTS (SELECT 1 FROM memories y WHERE y.owner = {a}.owner AND y.id != {a}.id'
+                ' AND NOT ({a}.subject IS NOT NULL AND {a}.environment IS NOT NULL AND {a}.attribute IS NOT NULL'
+                '   AND EXISTS (SELECT 1 FROM memories y WHERE y.owner = {a}.owner AND y.id != {a}.id'
                 '   AND ' + same_key +
                 '   AND y.effective_from > {a}.effective_from AND y.recorded_at < {a}.recorded_at'
-                '   AND y.effective_from <= :now AND y.superseded_by IS NULL)').format(a=a)
+                '   AND y.effective_from <= :now))').format(a=a)
+
+    @classmethod
+    def _select_current(cls, alias='m'):
+        return 'CASE WHEN ' + cls._current_clause(alias) + ' THEN 1 ELSE 0 END'
 
     def _key_params(self, subject, environment, attribute, prefix='k_'):
         return {prefix + 'subject': subject, prefix + 'environment': environment, prefix + 'attribute': attribute}
@@ -156,6 +164,8 @@ class MemoryStore:
         d = dict(r)
         d['tags'] = json.loads(d['tags'] or '[]')
         d['pinned'] = bool(d['pinned'])
+        if 'is_current' in d:
+            d['is_current'] = bool(d['is_current'])
         return d
 
     def _fresh_recorded_at(self):
@@ -180,9 +190,10 @@ class MemoryStore:
         with self.lock:
             params = {'o': owner, 't': text, **self._key_params(subject, environment, attribute)}
             dup = self.db.execute(
-                'SELECT id FROM memories WHERE owner=:o AND lower(text)=lower(:t) AND superseded_by IS NULL AND '
-                + self._same_key('memories'), params).fetchone()
-            if dup and supersedes is None:
+                'SELECT id, effective_from FROM memories WHERE owner=:o AND lower(text)=lower(:t)'
+                ' AND superseded_by IS NULL AND ' + self._same_key('memories'), params).fetchone()
+            if (dup and supersedes is None
+                    and (effective_from is None or float(dup['effective_from']) == effective)):
                 self.db.execute('UPDATE memories SET tags=?, updated=? WHERE id=?', (json.dumps(tags), now, dup['id']))
                 if self.fts:
                     self.db.execute('UPDATE memory_fts SET tags=? WHERE id=?', (' '.join(tags), dup['id']))
@@ -194,8 +205,13 @@ class MemoryStore:
                     raise ValueError('No memory with id %s for this owner.' % supersedes)
                 if target['superseded_by'] is not None:
                     raise ValueError('Memory %s is already superseded by %s.' % (supersedes, target['superseded_by']))
-            count = self.db.execute('SELECT COUNT(*) FROM memories WHERE owner=? AND superseded_by IS NULL',
-                                    (owner,)).fetchone()[0]
+            # Budget: rows replaced by an already-effective successor no longer count. A predecessor
+            # whose replacement is future-dated still counts (it is still the active fact), and
+            # ambiguous/candidate/backdated rows count too, so no transition evades the budget.
+            count = self.db.execute(
+                'SELECT COUNT(*) FROM memories m WHERE m.owner=? AND NOT (m.superseded_by IS NOT NULL'
+                ' AND (SELECT s.effective_from FROM memories s WHERE s.id = m.superseded_by) <= ?)',
+                (owner, now)).fetchone()[0]
             if count >= MAX_MEMORIES:
                 raise ValueError('Memory limit reached (%d). Delete or merge old memories first.' % MAX_MEMORIES)
             mid = secrets.token_hex(6)
@@ -233,21 +249,28 @@ class MemoryStore:
         environment = self._key_part(environment, 'environment')
         attribute = self._key_part(attribute, 'attribute')
         params = {'o': owner, **self._key_params(subject, environment, attribute)}
+        params['now'] = float(self._now())
         with self.lock:
-            rows = self.db.execute('SELECT * FROM memories WHERE owner=:o AND ' + self._same_key('memories') +
+            rows = self.db.execute('SELECT memories.*, ' + self._select_current('memories') + ' AS is_current'
+                                   ' FROM memories WHERE owner=:o AND ' + self._same_key('memories') +
                                    ' ORDER BY effective_from ASC, recorded_at ASC', params).fetchall()
         return [self._row(r) for r in rows]
 
     def update(self, owner, mid, text=None, tags=None, pinned=None):
+        """Legacy in-place edit: overwrites the text, no history kept. For facts that changed, prefer
+        supersession. Text edits are refused on superseded rows so history cannot be rewritten."""
         with self.lock:
             row = self.db.execute('SELECT * FROM memories WHERE id=? AND owner=?', (mid, owner)).fetchone()
             if row is None:
                 return None
+            if text is not None and row['superseded_by'] is not None:
+                raise ValueError('That memory was superseded; record the new value with supersede_memory so '
+                                 'history is kept, or forget it.')
             new_text = self._clean(text) if text is not None else row['text']
             new_tags = self._tags(tags) if tags is not None else json.loads(row['tags'])
             new_pinned = row['pinned'] if pinned is None else (1 if pinned else 0)
             self.db.execute('UPDATE memories SET text=?, tags=?, pinned=?, updated=? WHERE id=?',
-                            (new_text, json.dumps(new_tags), new_pinned, time.time(), mid))
+                            (new_text, json.dumps(new_tags), new_pinned, float(self._now()), mid))
             if self.fts:
                 self.db.execute('UPDATE memory_fts SET text=?, tags=? WHERE id=?', (new_text, ' '.join(new_tags), mid))
         return self.get(owner, mid)
@@ -258,7 +281,16 @@ class MemoryStore:
         return self._row(row) if row else None
 
     def delete(self, owner, mid):
+        """Forgetting the newest value in a chain restores its predecessor. Deleting a row that sits
+        inside a chain (superseded and itself superseding another) is refused: it would silently
+        resurrect a contradictory old value. Forget the newest value instead, one step at a time."""
         with self.lock:
+            row = self.db.execute('SELECT superseded_by FROM memories WHERE id=? AND owner=?', (mid, owner)).fetchone()
+            if row and row['superseded_by'] is not None:
+                incoming = self.db.execute('SELECT 1 FROM memories WHERE superseded_by=?', (mid,)).fetchone()
+                if incoming:
+                    raise ValueError('That memory sits inside a supersession chain; forget the newest value '
+                                     'in the chain instead (one step at a time) so no old value is silently restored.')
             cur = self.db.execute('DELETE FROM memories WHERE id=? AND owner=?', (mid, owner))
             if cur.rowcount:
                 # Deleting a replacement restores its predecessor as current (link cleared, no data resurrected).
@@ -270,7 +302,10 @@ class MemoryStore:
 
     def list(self, owner, limit=500):
         with self.lock:
-            rows = self.db.execute('SELECT * FROM memories WHERE owner=? ORDER BY pinned DESC, updated DESC LIMIT ?', (owner, limit)).fetchall()
+            rows = self.db.execute(
+                'SELECT m.*, ' + self._select_current('m') + ' AS is_current FROM memories m'
+                ' WHERE m.owner=:o ORDER BY m.pinned DESC, m.updated DESC LIMIT :lim',
+                {'o': owner, 'lim': limit, 'now': float(self._now())}).fetchall()
         return [self._row(r) for r in rows]
 
     def count(self, owner):
@@ -288,7 +323,8 @@ class MemoryStore:
                 try:
                     match = ' OR '.join('"' + w.replace('"', '') + '"' for w in words)
                     rows = self.db.execute(
-                        'SELECT m.* FROM memory_fts f JOIN memories m ON m.id=f.id WHERE f.owner=:o'
+                        'SELECT m.*, ' + self._select_current('m') + ' AS is_current'
+                        ' FROM memory_fts f JOIN memories m ON m.id=f.id WHERE f.owner=:o'
                         ' AND memory_fts MATCH :match AND ' + self._current_clause('m') +
                         ' ORDER BY bm25(memory_fts), m.pinned DESC LIMIT :lim',
                         {'o': owner, 'match': match, 'lim': limit, 'now': now}).fetchall()
@@ -299,7 +335,8 @@ class MemoryStore:
                 params = {'o': owner, 'lim': limit, 'now': now}
                 params.update({'w%d' % i: '%' + w + '%' for i, w in enumerate(words)})
                 rows = self.db.execute(
-                    'SELECT m.* FROM memories m WHERE m.owner=:o AND (' + like + ') AND ' + self._current_clause('m') +
+                    'SELECT m.*, ' + self._select_current('m') + ' AS is_current FROM memories m'
+                    ' WHERE m.owner=:o AND (' + like + ') AND ' + self._current_clause('m') +
                     ' ORDER BY m.pinned DESC, m.updated DESC LIMIT :lim', params).fetchall()
         return [self._row(r) for r in rows]
 
