@@ -76,7 +76,7 @@ Reliability pack: real cancellation, per-run log, backup/restore, optional edit 
   itself already happened). The netguard's DNS lookup is separate from Chromium's own, so DNS rebinding is left
   to Chromium's built-in local-network checks. Keep the feature off except on a trusted machine until a
   vetting-proxy fix lands (see docs/LIMITATIONS.md). No typing exists, the browser context is ephemeral (no
-  cookies, profile or saved logins) and downloads are never accepted; the Playwright driver and Chromium start
+  cookies, profile or saved logins) and downloads are never accepted; the Play wright driver and Chromium start
   from a scrubbed environment (no API keys or tokens); each browse action has a wall-clock limit after which the
   browser is killed; screenshots reach the model labelled as untrusted page content; at most
   `GROK_AGENT_BROWSER_MAX_ACTIONS` (default 8) browse actions per turn; Chromium is killed at turn end.
