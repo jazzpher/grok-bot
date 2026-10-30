@@ -1239,6 +1239,8 @@ class LiveSandboxHardeningTests(unittest.TestCase):
         """A host-created SysV shm segment (test canary, removed afterwards) must not
         appear in the namespace's /proc/sysvipc."""
         if not shutil.which('ipcmk'):
+            if _REQUIRE_CAPS:
+                self.fail('required live-browse capability missing: ipcmk (util-linux)')
             self.skipTest('ipcmk (util-linux) not available')
         made = subprocess.run(['ipcmk', '-M', '4096'], capture_output=True, text=True)
         self.assertEqual(made.returncode, 0, made.stderr)
