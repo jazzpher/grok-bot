@@ -308,6 +308,44 @@ class SupersessionContractTest(_Base):
         self.assertGreater(self.store.get('o', b['id'])['recorded_at'], self.store.get('o', a['id'])['recorded_at'])
 
 
+    def test_explicit_backdated_supersede_stays_visible(self):
+        # Regression (delta-review HIGH): an explicit supersedes link dominates the backdate rule;
+        # a replacement effective EARLIER than its target must not vanish together with the target.
+        a = self.store.save('o', 'Dev server port is 8080', effective_from=100.0, **KEY)
+        n = self.store.save('o', 'Dev server port is 9090', effective_from=50.0, supersedes=a['id'], **KEY)
+        self.assertEqual([m['id'] for m in self.store.search('o', 'dev server port')], [n['id']],
+                         'explicit backdated replacement must stay current')
+        self.assertEqual([m['id'] for m in self.store.relevant('o', 'dev server port')], [n['id']])
+        self.assertEqual([m['id'] for m in self.store.history('o', **KEY)], [n['id'], a['id']])
+
+    def test_explicit_chain_with_unordered_effective_dates(self):
+        # Regression (delta-review HIGH): chain dominance is transitive; unordered effective dates
+        # inside an explicit chain must not hide the terminal row.
+        a = self.store.save('o', 'Server build uses alpha', effective_from=100.0, **KEY)
+        b = self.store.save('o', 'Server build uses beta', effective_from=200.0, supersedes=a['id'], **KEY)
+        c = self.store.save('o', 'Server build uses gamma', effective_from=50.0, supersedes=b['id'], **KEY)
+        self.assertEqual([m['id'] for m in self.store.search('o', 'server build')], [c['id']])
+        self.assertEqual([m['id'] for m in self.store.relevant('o', 'server build')], [c['id']])
+
+    def test_cross_key_supersedes_rejected(self):
+        # Regression (delta-review): an explicit link across different keys would split the fact's
+        # history; supersession stays within one (subject, environment, attribute) key.
+        a = self.store.save('o', 'Port is 8080', **KEY)
+        for kwargs in (dict(subject='other-app', environment='local', attribute='port'),
+                       dict(),  # keyed target, keyless new row
+                       dict(subject='dev-server', environment='local')):  # partial key
+            with self.assertRaises(ValueError, msg=repr(kwargs)):
+                self.store.save('o', 'Port is 9090', supersedes=a['id'], **kwargs)
+        self.assertIsNone(self.store.get('o', a['id'])['superseded_by'], 'rejected saves must not link')
+        k = self.store.save('o', 'Prefers Taglish')
+        keyed_upgrade = self.store.save('o', 'Port is 9090', supersedes=k['id'], **KEY)
+        # A fully keyless (legacy) target MAY be superseded under a new key: the new key defines
+        # the chain from here; this is the migration upgrade path, not history splitting.
+        self.assertEqual(self.store.get('o', k['id'])['superseded_by'], keyed_upgrade['id'])
+        same = self.store.save('o', 'Port is 9091', supersedes=a['id'], **KEY)
+        self.assertEqual(self.store.get('o', a['id'])['superseded_by'], same['id'])
+
+
 class _Reg:
     """Captures @registry.tool registrations from grokbot.tools.memory without the real registry."""
     def __init__(self):
