@@ -12,26 +12,30 @@ Deliberately separate from both existing browser surfaces:
 This module reaches the PUBLIC web, so the rules are different:
 
 * Off by default (``GROK_AGENT_BROWSER=on``).
-* Every request Playwright routes (top-level navigation, subresource,
-  WebSocket) is vetted by the public netguard (``browser_tools.request_allowed``)
-  before it is sent: http/https only, no userinfo, no private/loopback/LAN/
-  reserved targets after the netguard's own DNS resolution.
-* NOT covered: redirect hops. Playwright does not route them, so a 3xx from a
-  public or approved page to loopback, the LAN or an unapproved host is still
-  requested by Chromium; only the page it finally lands on is checked
-  afterwards (``_verify_location``), blanked and refused - its content never
-  reaches the model, but the request itself has already been sent. The
-  netguard's DNS lookup is also separate from Chromium's, so DNS rebinding is
-  left to Chromium's own local-network checks. Closing both needs a vetting
-  proxy; until then keep GROK_AGENT_BROWSER off except on a trusted machine.
+* Chromium runs INSIDE a network namespace with no direct egress
+  (``grokbot/browser_isolation.py``, bubblewrap). Every network path -
+  navigation, subresource, WebSocket and every redirect hop, which Playwright
+  does not route - must pass through a fail-closed vetting proxy
+  (``grokbot/vetproxy.py``) before any byte is sent. Isolation is mandatory:
+  without bubblewrap the session refuses to start rather than fall back to an
+  unproxied browser.
+* The proxy allows a connection only when the destination host is in the
+  approved set AND resolves (resolved and pinned by the proxy, so Chromium
+  never does DNS and rebinding flips nothing) to public internet addresses -
+  no loopback/private/LAN/reserved targets, ports 80/443 only. Refusals are
+  recorded and surfaced to the user as "approve this host and retry".
 * Domain approval: the first ``browse_open`` to a hostname pauses for the
   user's approval (per-domain "always" rules are saved; a one-time allow covers
-  that host for the rest of the turn). A top-level navigation (e.g. a click) to
-  a host that was never approved is refused before it is sent; if a redirect
-  lands the page on one, the page is blanked and the tool errors out. Either
-  way the agent must call browse_open for the new domain, which asks again.
-  Subresources (images, scripts, CDN calls) are vetted by the netguard only -
-  approving a domain approves the document, not every host the page phones.
+  that host for the rest of the turn). Approval is now enforced for EVERY
+  destination host at the proxy, including redirect hops and subresource/CDN
+  hosts: a page that redirects to or embeds an unapproved host has those
+  requests refused before they fire, and the tool names the blocked host so
+  the user can approve it explicitly. A top-level navigation (e.g. a click) to
+  a host that was never approved is additionally refused pre-flight by the
+  route guard. The proxy sees host:port per tunnel, not URLs, so policy at
+  that layer is host-scoped (see vetproxy docstring for the coalescing limit).
+* Service workers are blocked at the context level (read/click-only: no
+  persistent in-page agents, no worker-mediated fetch path).
 * No typing: there is no browse_type. The agent can read pages and click
   elements, nothing more. The browser context is ephemeral (fresh every turn,
   no profile, cookies or saved logins) and downloads are not accepted, so a
@@ -215,7 +219,7 @@ def _on_worker(fn):
 class AgentBrowserSession:
     """One headless Chromium page for one turn: public web only, ephemeral context."""
 
-    def __init__(self, extra_args=None):
+    def __init__(self, extra_args=None, resolver=None, allowed_ports=None, ip_check=None):
         self._pw = None
         self._browser = None
         self._context = None
@@ -225,6 +229,11 @@ class AgentBrowserSession:
         self._approved = set()
         self._blocked = None                              # (kind, host) the route guard refused this action
         self._extra_args = list(extra_args or [])
+        self._ip_check = ip_check
+        self._resolver = resolver                         # test seam for the vetting proxy's DNS
+        self._allowed_ports = allowed_ports               # test seam: ephemeral test-server ports
+        self._proxy = None
+        self._isolation = None
 
     def _ensure(self):
         if self._page is not None:
@@ -240,16 +249,34 @@ class AgentBrowserSession:
                 self._driver_pid = self._pw._impl_obj._connection._transport._proc.pid
             except AttributeError:
                 self._driver_pid = None
-            kwargs = {'headless': _cfg.BROWSER_HEADLESS, 'env': scrubbed_env()}
-            if _cfg.BROWSER_EXECUTABLE:
-                kwargs['executable_path'] = _cfg.BROWSER_EXECUTABLE
-            args = list(_cfg.BROWSER_ARGS) + self._extra_args
-            if args:
-                kwargs['args'] = args
+            from grokbot import browser_isolation, vetproxy
+            if not browser_isolation.available():
+                raise BrowserError('Isolated browsing needs bubblewrap (bwrap) installed; without '
+                                   'enforceable network isolation the agent browser stays disabled. '
+                                   'Install bubblewrap or leave GROK_AGENT_BROWSER off.')
+            self._isolation = browser_isolation.BrowserIsolation()
+            proxy_kwargs = {}
+            if self._allowed_ports is not None:
+                proxy_kwargs['allowed_ports'] = self._allowed_ports
+            if self._ip_check is not None:
+                proxy_kwargs['ip_check'] = self._ip_check
+            self._proxy = vetproxy.VettingProxy(allowed_hosts=lambda: set(self._approved),
+                                                resolver=self._resolver, **proxy_kwargs)
+            self._proxy.listen_unix(self._isolation.proxy_sock)
+            chromium_path = _cfg.BROWSER_EXECUTABLE or self._pw.chromium.executable_path
+            kwargs = {'headless': _cfg.BROWSER_HEADLESS, 'env': scrubbed_env(),
+                      # --disable-quic: defence in depth; the namespace already blocks UDP egress.
+                      'args': (list(_cfg.BROWSER_ARGS) + self._extra_args + ['--disable-quic']),
+                      'executable_path': self._isolation.write_wrapper(chromium_path,
+                                                                       list(_cfg.BROWSER_ARGS)
+                                                                       + self._extra_args),
+                      'proxy': {'server': 'http://127.0.0.1:%d' % browser_isolation.RELAY_PORT}}
             self._browser = self._pw.chromium.launch(**kwargs)
+            self._proxy.drain_denials()                    # Chromium startup chatter, not page traffic
             # Ephemeral context: no profile, cookies or storage state carry over,
             # and downloads are never accepted (a click cannot save a file).
-            self._context = self._browser.new_context(viewport=dict(VIEWPORT), accept_downloads=False)
+            self._context = self._browser.new_context(viewport=dict(VIEWPORT), accept_downloads=False,
+                                                          service_workers='block')
             self._context.route('**/*', self._route)
             # WebSockets bypass context.route entirely; refuse them unless the netguard passes the host.
             try:
@@ -259,6 +286,9 @@ class AgentBrowserSession:
             self._page = self._context.new_page()
             self._page.set_default_timeout(_cfg.BROWSER_TIMEOUT * 1000)
             self._page.set_default_navigation_timeout(_cfg.BROWSER_TIMEOUT * 1000)
+        except BrowserError:
+            self._close()
+            raise                                     # keep the specific reason (e.g. bwrap missing)
         except Exception as exc:
             self._close()
             raise BrowserError('Browser could not start (' + type(exc).__name__ + '). '
@@ -269,8 +299,8 @@ class AgentBrowserSession:
     def _route(self, route):
         """Every request is netguarded, and a top-level navigation to a host the user has not approved is
         refused before any request is sent (a click or script can no longer carry data to an unapproved host).
-        Playwright never calls this handler for redirect hops, so a 3xx from an approved host to another host is
-        still only caught afterwards by _verify_location; closing that needs a vetting proxy (see review)."""
+        Playwright never calls this handler for redirect hops; those are caught pre-flight by the vetting
+        proxy (the isolated browser has no other network path), with _verify_location as the last line."""
         request = route.request
         try:
             url = request.url
@@ -291,12 +321,10 @@ class AgentBrowserSession:
                 pass
 
     def _ws_route(self, ws):
+        """WebSockets are refused entirely: this is a read/click-only browser, and a CONNECT
+        tunnel cannot distinguish WSS from HTTPS, so no layer can vet them as WebSockets."""
         try:
-            http_url = re.sub(r'^ws', 'http', ws.url, count=1)
-            if request_allowed(http_url):
-                ws.connect_to_server()
-            else:
-                ws.close(code=1008, reason='blocked')
+            ws.close(code=1008, reason='blocked')
         except Exception:
             pass
 
@@ -322,6 +350,12 @@ class AgentBrowserSession:
             worker.shutdown(wait=False)
         self._page = self._context = self._browser = self._pw = None
         self._driver_pid = None
+        if self._proxy is not None:
+            self._proxy.close()
+            self._proxy = None
+        if self._isolation is not None:
+            self._isolation.cleanup()
+            self._isolation = None
 
     def _raise_blocked(self):
         blocked, self._blocked = self._blocked, None
@@ -385,6 +419,17 @@ class AgentBrowserSession:
         if images:
             image, mime = self._shot()
             result['image'] = (image, mime)
+        if self._proxy is not None:
+            denied = self._proxy.drain_denials()
+            if denied:
+                # Only 'host not approved' can be fixed by an approval; private-address,
+                # port and verification refusals are policy, not a missing approval.
+                approvable = sorted({h for h, _p, r in denied if h and r == 'host not approved'})
+                refused = sorted({h for h, _p, r in denied if h and r != 'host not approved'})
+                if approvable:
+                    result['blocked_hosts'] = approvable
+                if refused:
+                    result['refused_hosts'] = refused
         return result
 
     @_on_worker
@@ -392,6 +437,8 @@ class AgentBrowserSession:
         self._approved = approved_hosts
         self._blocked = None
         page = self._ensure()
+        if self._proxy is not None:
+            self._proxy.drain_denials()
         try:
             page.goto(check_url(url), wait_until='domcontentloaded')
         except BrowserError:
@@ -477,6 +524,12 @@ class AgentBrowserSession:
                 except Exception:
                     pass
         self._page = self._context = self._browser = self._pw = None
+        if self._proxy is not None:
+            self._proxy.close()
+            self._proxy = None
+        if self._isolation is not None:
+            self._isolation.cleanup()
+            self._isolation = None
         return 'Browser closed.'
 
 
@@ -491,4 +544,12 @@ def result_payload(state, action, arguments, images_enabled):
         text += '\nThe screenshot is attached below as an image. Use it together with the element list.'
     elif not images_enabled:
         text += '\n(Screenshot images disabled via GROK_AGENT_BROWSER_IMAGES=off; text snapshot only.)'
+    if state.get('blocked_hosts'):
+        text += ('\nBlocked %d unapproved destination host(s) before any request was sent: %s. '
+                 'To load from one, the user must approve it - call browse_open for that domain '
+                 '(they will be asked).' % (len(state['blocked_hosts']), ', '.join(state['blocked_hosts'])))
+    if state.get('refused_hosts'):
+        text += ('\nRefused %d destination host(s) that are not approvable (private/internal address, '
+                 'forbidden port, or failed verification): %s. No request was sent and approval '
+                 'cannot allow these.' % (len(state['refused_hosts']), ', '.join(state['refused_hosts'])))
     return text, meta
