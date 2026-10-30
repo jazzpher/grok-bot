@@ -517,13 +517,19 @@ class AgentBrowserSession:
             self._worker = None
 
     def _close(self):
-        for obj in (self._page, getattr(self, '_context', None), self._browser, self._pw):
+        for obj in (self._page, getattr(self, '_context', None), self._browser):
             if obj is not None:
                 try:
                     obj.close()
                 except Exception:
                     pass
+        if self._pw is not None:
+            try:
+                self._pw.stop()                 # driver object has stop(), not close()
+            except Exception:
+                pass
         self._page = self._context = self._browser = self._pw = None
+        self._driver_pid = None
         if self._proxy is not None:
             self._proxy.close()
             self._proxy = None
