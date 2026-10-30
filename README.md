@@ -209,12 +209,16 @@ lets the interactive agent open PUBLIC web pages and see them: opt in with
 needs Playwright + Chromium). Each view returns a screenshot image (with a
 vision-capable model; `GROK_AGENT_BROWSER_IMAGES=off` keeps the text snapshot
 only) plus bounded page text and a numbered list of clickable elements, at most
-8 actions per turn (`GROK_AGENT_BROWSER_MAX_ACTIONS`). Every request Playwright
-routes must pass the public netguard (no loopback/LAN/private addresses), and
-you approve each new domain before it loads ("always allow" saves a per-domain
-rule). Redirect hops are not routed, so a 3xx to loopback, the LAN or an
-unapproved host is still requested; only the page it lands on is blanked and
-blocked. Keep it off except on a trusted machine (see docs/LIMITATIONS.md).
+8 actions per turn (`GROK_AGENT_BROWSER_MAX_ACTIONS`). Chromium runs INSIDE a
+bubblewrap network namespace with no direct egress (mandatory: no bubblewrap, no
+browser), and every connection - navigations, subresources and every redirect
+hop, which Playwright does not route - must pass a fail-closed vetting proxy:
+approved hosts only, public IPs only (resolved and pinned by the proxy, so DNS
+rebinding flips nothing), ports 80/443. An unapproved host is refused before any
+request fires and is named back to you for approval. WebSockets are refused
+entirely (read/click-only). This is EXPERIMENTAL and Linux-only; the measured
+security boundary and its open edges are in docs/AGENT_BROWSER_VETPROXY.md -
+keep it off unless you are testing it (see docs/LIMITATIONS.md).
 There is no typing: the agent can read, scroll and click only, in an ephemeral
 context with no cookies, profile or saved logins, and downloads are never saved.
 Chromium is killed when the turn ends. Page content is untrusted data; the agent

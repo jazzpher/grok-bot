@@ -13,6 +13,28 @@ jobs:
           node-version: '20'
       - run: pip install -r requirements.txt
       - run: python -m unittest discover -v
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      # Ubuntu 24.04 (ubuntu-latest) restricts unprivileged user namespaces via
+      # AppArmor for unconfined processes, which bubblewrap needs. Grant ONLY
+      # /usr/bin/bwrap a scoped AppArmor profile carrying the userns rule; the
+      # global restriction stays in force for everything else (no sysctl change).
+      - name: scoped AppArmor userns profile for bwrap
+        run: |
+          printf 'abi <abi/4.0>,\ninclude <tunables/global>\n\nprofile bwrap /usr/bin/bwrap flags=(unconfined) {\n  userns,\n}\n' | sudo tee /etc/apparmor.d/bwrap
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap
+      # Non-gating diagnostics: which runner image, restriction state (default 1
+      # now that CI no longer relaxes it), and plain-userns vs profiled-bwrap probes.
+      - name: diagnose runner userns and loopback
+        continue-on-error: true
+        run: |
+          cat /etc/os-release
+          sysctl kernel.apparmor_restrict_unprivileged_userns
+          unshare -rn ip link set lo up && echo UNSHARE-LO-OK || echo UNSHARE-LO-FAIL
+          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-net true && echo BWRAP-MIN-OK || echo BWRAP-MIN-FAIL
+      - run: pip install playwright h2 && python -m playwright install chromium --with-deps
+      # Live isolation suite with explicitly installed capabilities: a missing
+      # capability here must FAIL (GROK_REQUIRE_LIVE_BROWSE_CAPS=1), never skip.
+      - run: GROK_REQUIRE_LIVE_BROWSE_CAPS=1 python -m unittest test_vetproxy test_agent_browse -v
       - run: python -m py_compile webui.py agent_loop.py bot.py task_harness.py grokbot/*.py grokbot/tools/*.py grokbot/gateway/*.py
       - run: for f in test_*.cjs; do node "$f" || exit 1; done
       - run: python -m grokbot exec --mock --workspace /tmp/ci-ws -q "smoke" | grep -q "(mock) got your message"

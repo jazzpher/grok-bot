@@ -284,8 +284,10 @@ class _Server(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
-@unittest.skipUnless(__import__('os').environ.get('GROK_LIVE_BROWSE_TESTS') == '1',
-                     'live Chromium test: set GROK_LIVE_BROWSE_TESTS=1 with playwright + chromium installed')
+from test_vetproxy import _cap_gate, _LIVE, _REQUIRE_CAPS
+
+
+@_cap_gate(_LIVE, 'live Chromium test needs playwright + chromium installed')
 class LiveChromiumTests(unittest.TestCase):
     """Real Playwright pass against a local server, reached through a fake PUBLIC hostname
     (Chromium --host-resolver-rules maps it to 127.0.0.1; Python DNS is patched to return a
@@ -311,6 +313,11 @@ class LiveChromiumTests(unittest.TestCase):
         cls.server.server_close()
 
     def setUp(self):
+        from grokbot import browser_isolation
+        if not browser_isolation.available():
+            if _REQUIRE_CAPS:
+                self.fail('required live-browse capability missing: bubblewrap (bwrap)')
+            self.skipTest('isolated browsing needs bubblewrap (bwrap)')
         real_getaddrinfo = socket.getaddrinfo
 
         def fake_getaddrinfo(host, port, *args, **kwargs):
@@ -321,8 +328,21 @@ class LiveChromiumTests(unittest.TestCase):
         patcher = mock.patch('socket.getaddrinfo', side_effect=fake_getaddrinfo)
         patcher.start()
         self.addCleanup(patcher.stop)
-        rules = 'MAP %s 127.0.0.1, MAP %s 127.0.0.1' % (self.A, self.B)
-        self.session = AgentBrowserSession(extra_args=['--host-resolver-rules=' + rules])
+
+        import ipaddress
+
+        def resolver(h, port):
+            # Test seam for the vetting proxy: the fake public hosts map to the local test
+            # server (pre-vetted). Chromium no longer resolves DNS itself - the proxy does.
+            if h in (self.A, self.B):
+                return [ipaddress.ip_address('127.0.0.1')]
+            return []
+
+        # Same fake topology as test_vetproxy: the local server plays "public",
+        # 127.0.0.2 plays the forbidden internal target.
+        ip_check = lambda ip: ipaddress.ip_address(ip) == ipaddress.ip_address('127.0.0.2')
+        self.session = AgentBrowserSession(resolver=resolver, allowed_ports=(80, 443, self.server.port),
+                                           ip_check=ip_check)
         self.addCleanup(self.session.close)
 
     def test_open_see_scroll_click_roundtrip(self):
@@ -361,9 +381,9 @@ class LiveChromiumTests(unittest.TestCase):
         self.assertEqual(state['snapshot']['title'], 'Other site')
 
     def test_redirect_to_loopback_page_is_blanked(self):
-        # Known gap: Playwright does not route redirect hops, so the 302 to 127.0.0.1 IS requested (the local
-        # server sees it). What this proves is the after-the-fact check: the landed page is blanked and the
-        # tool refuses with BrowserError, so nothing from it reaches the model. Blocking the hop needs a proxy.
+        # With the vetting proxy the 302 hop to 127.0.0.1 is refused before it is sent (the
+        # server never sees /secret); the tool still refuses with BrowserError. The full
+        # never-fires assertions live in test_vetproxy.py's LiveIsolatedBrowseTests.
         approved = {self.A}
         self.session.open(self.base_a + '/', approved)
         with self.assertRaises(BrowserError):
