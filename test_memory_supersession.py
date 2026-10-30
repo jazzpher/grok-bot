@@ -194,6 +194,81 @@ class SupersessionContractTest(_Base):
         self.assertNotEqual(a['id'], b['id'], 'dedup must include the key')
         self.assertEqual(self.store.count('o'), 2)
 
+    def test_backdated_row_stays_history_after_later_fact_is_superseded(self):
+        # Regression (review HIGH): the backdate rule must hold even when the later-effective row
+        # is itself superseded; otherwise the stale backdated fact resurfaces as current.
+        a = self.store.save('o', 'Dev server port is 8080', effective_from=500.0, **KEY)
+        b = self.store.save('o', 'Dev server port was 2000 back then', effective_from=100.0, **KEY)
+        self.assertEqual([m['id'] for m in self.store.search('o', 'dev server port')], [a['id']])
+        n = self.store.save('o', 'Dev server port is 9090', effective_from=900.0, supersedes=a['id'], **KEY)
+        self.assertEqual([m['id'] for m in self.store.search('o', 'dev server port')], [n['id']],
+                         'backdated B must not resurface when A is superseded')
+        self.assertEqual([m['id'] for m in self.store.history('o', **KEY)], [b['id'], a['id'], n['id']])
+
+    def test_keyless_memories_never_hide_each_other(self):
+        # Regression (review HIGH): backdated grouping relates only fully-keyed rows; keyless facts
+        # are independent and never hide one another, in search and in relevant().
+        self.store.save('o', 'Uses pnpm', effective_from=2000.0)
+        t = self.store.save('o', 'Prefers Taglish', effective_from=1000.0)
+        ids = {m['id'] for m in self.store.search('o', 'pnpm taglish')}
+        self.assertIn(t['id'], ids)
+        rel = self.store.relevant('o', 'taglish pnpm')
+        self.assertIn(t['id'], [m['id'] for m in rel])
+
+    def test_partial_key_rows_never_hide_each_other(self):
+        a = self.store.save('o', 'Uses pnpm for builds', subject='web', effective_from=2000.0)
+        b = self.store.save('o', 'Uses yarn for builds', subject='web', effective_from=1000.0)
+        ids = {m['id'] for m in self.store.search('o', 'builds')}
+        self.assertEqual(ids, {a['id'], b['id']}, 'partial keys get no backdate hiding and no advisory')
+
+    def test_pending_future_predecessor_still_counts_against_cap(self):
+        # Regression (review): a predecessor whose replacement is future-dated is still the active
+        # fact and must count against the budget until the replacement activates.
+        from unittest import mock
+        import grokbot.memory as gm
+        now = time.time()
+        with mock.patch.object(gm, 'MAX_MEMORIES', 3):
+            old = self.store.save('o', 'Dev server port is 3000', effective_from=now - 100, **KEY)
+            self.store.save('o', 'Dev server port is 8080', effective_from=now + 86400, supersedes=old['id'], **KEY)
+            self.store.save('o', 'Uses pnpm')
+            with self.assertRaises(ValueError):
+                self.store.save('o', 'Uses cargo', ['misc'])
+
+    def test_delete_midchain_row_refused_and_chain_preserved(self):
+        a = self.store.save('o', 'Dev server port is 3000', **KEY)
+        b = self.store.save('o', 'Dev server port is 8080', supersedes=a['id'], **KEY)
+        c = self.store.save('o', 'Dev server port is 9090', supersedes=b['id'], **KEY)
+        with self.assertRaises(ValueError):
+            self.store.delete('o', b['id'])
+        self.assertEqual(self.store.get('o', a['id'])['superseded_by'], b['id'])
+        self.assertEqual([m['id'] for m in self.store.search('o', 'dev server port')], [c['id']])
+        self.store.delete('o', c['id'])
+        self.assertEqual([m['id'] for m in self.store.search('o', 'dev server port')], [b['id']],
+                         'forgetting the newest value restores its predecessor')
+
+    def test_dedup_with_conflicting_explicit_effective_from_creates_new_row(self):
+        a = self.store.save('o', 'Port is 8080', effective_from=100.0, **KEY)
+        b = self.store.save('o', 'Port is 8080', effective_from=200.0, **KEY)
+        self.assertNotEqual(a['id'], b['id'], 'a different explicit effective_from is a new event, not a refresh')
+        self.assertEqual(self.store.get('o', b['id'])['candidate_supersedes'], a['id'])
+        c = self.store.save('o', 'Port is 8080', effective_from=100.0, **KEY)
+        self.assertEqual(c['id'], a['id'], 'same text, key and effective time still dedupes')
+
+    def test_update_text_on_superseded_row_refused(self):
+        old = self.store.save('o', 'Dev server port is 3000', **KEY)
+        self.store.save('o', 'Dev server port is 8080', supersedes=old['id'], **KEY)
+        with self.assertRaises(ValueError):
+            self.store.update('o', old['id'], text='Dev server port is 4040')
+        upd = self.store.update('o', old['id'], pinned=True)
+        self.assertTrue(upd['pinned'], 'non-text changes on history rows still allowed')
+
+    def test_list_marks_current_and_history_rows(self):
+        old = self.store.save('o', 'Dev server port is 3000', **KEY)
+        new = self.store.save('o', 'Dev server port is 8080', supersedes=old['id'], **KEY)
+        rows = {m['id']: m for m in self.store.list('o')}
+        self.assertFalse(rows[old['id']]['is_current'])
+        self.assertTrue(rows[new['id']]['is_current'])
+
     def test_deleting_superseder_restores_predecessor(self):
         old = self.store.save('o', 'Dev server port is 3000', **KEY)
         new = self.store.save('o', 'Dev server port is 8080', supersedes=old['id'], **KEY)
