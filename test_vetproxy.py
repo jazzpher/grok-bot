@@ -22,6 +22,14 @@ from browser_tools import BrowserError
 from grokbot import browser_isolation, vetproxy
 from grokbot.vetproxy import VettingProxy
 
+def _playwright_importable():
+    try:
+        import playwright.sync_api  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 GOOD = 'good.test'
 OTHER = 'other.test'
 LOCAL = ipaddress.ip_address('127.0.0.1')
@@ -793,10 +801,13 @@ class LiveWrapperTests(unittest.TestCase):
     bwrap: namespace contents, canary non-visibility, relay path, abstract sockets."""
 
     def _run_wrapper(self, body):
-        """Run a shell `body` as the 'chromium' through the real wrapper; return CompletedProcess."""
+        """Run a shell `body` as the 'chromium' through the real wrapper; return CompletedProcess.
+        `body` may be a callable taking the BrowserIsolation, for commands that need its paths."""
         from grokbot import browser_isolation
         iso = browser_isolation.BrowserIsolation()
         self.addCleanup(iso.cleanup)
+        if callable(body):
+            body = body(iso)
         fake = os.path.join(iso.dir, 'fake-chromium.sh')
         with open(fake, 'w') as fh:
             fh.write('#!/bin/sh\n' + body)
@@ -835,7 +846,7 @@ class LiveWrapperTests(unittest.TestCase):
         self.addCleanup(lambda: os.path.exists(sock_path) and os.unlink(sock_path))
         pkg_dir = os.path.dirname(os.path.abspath(browser_isolation.__file__))
         top = pkg_dir.split(os.sep)[1]                       # first path component, e.g. 'downloads'
-        result, _iso = self._run_wrapper(
+        result, _iso = self._run_wrapper(lambda iso:
             'test -e %s && echo TMP-FILE-LEAK;\n'
             'test -e /etc/machine-id && echo ETC-LEAK;\n'
             'python3 -c "import socket;s=socket.socket(socket.AF_UNIX);s.settimeout(3);'
@@ -843,9 +854,9 @@ class LiveWrapperTests(unittest.TestCase):
             'echo ---;\n'
             'ls %s;\n'
             'echo ---;\n'
-            'find /%s;\n'
+            'find /%s -path %s -prune -o -print;\n'
             'echo ---;\n'
-            'ls /' % (canary, sock_path, pkg_dir, top))
+            'ls /' % (canary, sock_path, pkg_dir, top, iso.dir))
         self.assertEqual(result.returncode, 0, result.stderr[:300])
         self.assertNotIn('TMP-FILE-LEAK', result.stdout)
         self.assertNotIn('ETC-LEAK', result.stdout)
@@ -979,6 +990,7 @@ class ResourceLifecycleTests(unittest.TestCase):
                 pass
         return count
 
+    @unittest.skipUnless(_playwright_importable(), 'needs playwright installed')
     def test_session_refusal_leaves_no_resources(self):
         from grokbot import agent_browser
         from grokbot.browser_isolation import WRAPPER_PREFIX
@@ -1165,6 +1177,7 @@ class DenialSplitTests(unittest.TestCase):
                             'rebinding must never be reported as approval-fixable')
 
 
+@unittest.skipUnless(browser_isolation.available(), 'needs bubblewrap')
 class LiveSandboxHardeningTests(unittest.TestCase):
     """Measured hardening properties of the PRODUCTION wrapper: effective capabilities,
     session isolation, SysV IPC isolation. Test-created canaries only."""
