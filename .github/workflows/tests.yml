@@ -1,1 +1,48 @@
-bmFtZTogVGVzdHMKb246IFtwdXNoLCBwdWxsX3JlcXVlc3RdCmpvYnM6CiAgdGVzdDoKICAgIHJ1bnMtb246IHVidW50dS1sYXRlc3QKICAgIHN0ZXBzOgogICAgICAtIHVzZXM6IGFjdGlvbnMvY2hlY2tvdXRAdjQKICAgICAgLSB1c2VzOiBhY3Rpb25zL3NldHVwLXB5dGhvbkB2NQogICAgICAgIHdpdGg6CiAgICAgICAgICBweXRob24tdmVyc2lvbjogJzMuMTEnCiAgICAgIC0gdXNlczogYWN0aW9ucy9zZXR1cC1ub2RlQHY0CiAgICAgICAgd2l0aDoKICAgICAgICAgIG5vZGUtdmVyc2lvbjogJzIwJwogICAgICAtIHJ1bjogcGlwIGluc3RhbGwgLXIgcmVxdWlyZW1lbnRzLnR4dAogICAgICAtIHJ1bjogcHl0aG9uIC1tIHVuaXR0ZXN0IGRpc2NvdmVyIC12CiAgICAgIC0gcnVuOiBzdWRvIGFwdC1nZXQgdXBkYXRlICYmIHN1ZG8gYXB0LWdldCBpbnN0YWxsIC15IGJ1YmJsZXdyYXAKICAgICAgIyBVYnVudHUgMjQuMDQgKHVidW50dS1sYXRlc3QpIHJlc3RyaWN0cyB1bnByaXZpbGVnZWQgdXNlciBuYW1lc3BhY2VzCiAgICAgICMgdmlhIEFwcEFybW9yLCB3aGljaCBidWJibGV3cmFwIG5lZWRzLiBMaWZ0IGl0IGJlZm9yZSB0aGUgbGl2ZSBzdWl0ZS4KICAgICAgLSBydW46IHN1ZG8gc3lzY3RsIC13IGtlcm5lbC5hcHBhcm1vcl9yZXN0cmljdF91bnByaXZpbGVnZWRfdXNlcm5zPTAKICAgICAgIyBOb24tZ2F0aW5nIGRpYWdub3N0aWNzOiB3aGljaCBydW5uZXIgaW1hZ2UsIGlzIHRoZSBzeXNjdGwgcmVhbGx5IDAsCiAgICAgICMgYW5kIGRvZXMgYSBwbGFpbiB1bnNoYXJlZCBuZXRucyBhbGxvdyBsb29wYmFjayBzZXR1cCB3aXRob3V0IGJ3cmFwPwogICAgICAtIG5hbWU6IGRpYWdub3NlIHJ1bm5lciB1c2VybnMgYW5kIGxvb3BiYWNrCiAgICAgICAgY29udGludWUtb24tZXJyb3I6IHRydWUKICAgICAgICBydW46IHwKICAgICAgICAgIGNhdCAvZXRjL29zLXJlbGVhc2UKICAgICAgICAgIHN5c2N0bCBrZXJuZWwuYXBwYXJtb3JfcmVzdHJpY3RfdW5wcml2aWxlZ2VkX3VzZXJucwogICAgICAgICAgdW5zaGFyZSAtcm4gaXAgbGluayBzZXQgbG8gdXAgJiYgZWNobyBVTlNIQVJFLUxPLU9LIHx8IGVjaG8gVU5TSEFSRS1MTy1GQUlMCiAgICAgICAgICBid3JhcCAtLXJvLWJpbmQgLyAvIC0tZGV2IC9kZXYgLS1wcm9jIC9wcm9jIC0tdW5zaGFyZS1uZXQgdHJ1ZSAmJiBlY2hvIEJXUkFQLU1JTi1PSyB8fCBlY2hvIEJXUkFQLU1JTi1GQUlMCiAgICAgIC0gcnVuOiBwaXAgaW5zdGFsbCBwbGF5d3JpZ2h0IGgyICYmIHB5dGhvbiAtbSBwbGF5d3JpZ2h0IGluc3RhbGwgY2hyb21pdW0gLS13aXRoLWRlcHMKICAgICAgIyBMaXZlIGlzb2xhdGlvbiBzdWl0ZSB3aXRoIGV4cGxpY2l0bHkgaW5zdGFsbGVkIGNhcGFiaWxpdGllczogYSBtaXNzaW5nCiAgICAgICMgY2FwYWJpbGl0eSBoZXJlIG11c3QgRkFJTCAoR1JPS19SRVFVSVJFX0xJVkVfQlJPV1NFX0NBUFM9MSksIG5ldmVyIHNraXAuCiAgICAgIC0gcnVuOiBHUk9LX1JFUVVJUkVfTElWRV9CUk9XU0VfQ0FQUz0xIHB5dGhvbiAtbSB1bml0dGVzdCB0ZXN0X3ZldHByb3h5IHRlc3RfYWdlbnRfYnJvd3NlIC12CiAgICAgIC0gcnVuOiBweXRob24gLW0gcHlfY29tcGlsZSB3ZWJ1aS5weSBhZ2VudF9sb29wLnB5IGJvdC5weSB0YXNrX2hhcm5lc3MucHkgZ3Jva2JvdC8qLnB5IGdyb2tib3QvdG9vbHMvKi5weSBncm9rYm90L2dhdGV3YXkvKi5weQogICAgICAtIHJ1bjogZm9yIGYgaW4gdGVzdF8qLmNqczsgZG8gbm9kZSAiJGYiIHx8IGV4aXQgMTsgZG9uZQogICAgICAtIHJ1bjogcHl0aG9uIC1tIGdyb2tib3QgZXhlYyAtLW1vY2sgLS13b3Jrc3BhY2UgL3RtcC9jaS13cyAtcSAic21va2UiIHwgZ3JlcCAtcSAiKG1vY2spIGdvdCB5b3VyIG1lc3NhZ2UiCiAgICAgIC0gbmFtZTogd2hlZWwgc21va2UgKHBpcCBpbnN0YWxsIC4gbXVzdCBzaGlwIGdhdGV3YXkgKyB3ZWIgYXNzZXRzKQogICAgICAgIHJ1bjogfAogICAgICAgICAgcHl0aG9uIC1tIHZlbnYgL3RtcC9wa2dlbnYKICAgICAgICAgIC90bXAvcGtnZW52L2Jpbi9waXAgaW5zdGFsbCAtcSAuCiAgICAgICAgICBjZCAvdG1wCiAgICAgICAgICAvdG1wL3BrZ2Vudi9iaW4vcHl0aG9uIC1jICJpbXBvcnQgZ3Jva2JvdC5nYXRld2F5LnRlbGVncmFtLCB3ZWJ1aTsgYyA9IHdlYnVpLmFwcC50ZXN0X2NsaWVudCgpOyBhc3NlcnQgYy5nZXQoJy8nKS5zdGF0dXNfY29kZSA9PSAyMDA7IGFzc2VydCBjLmdldCgnL3N0YXRpYy9hcHAuanMnKS5zdGF0dXNfY29kZSA9PSAyMDA7IHByaW50KCd3aGVlbCBzbW9rZSBPSycpIgogICAgICAtIHJ1bjogfAogICAgICAgICAgcHl0aG9uIC1tIGdyb2tib3QgZXhlYyAtLW1vY2sgLS13b3Jrc3BhY2UgL3RtcC9jaS13cyAtcSAnIXRvb2wgZGVsZWdhdGUgeyJ0YXNrIjogInNheSBoaSIsICJtYXhfc3RlcHMiOiAxfScgfCBncmVwIC1xICJTdWItYWdlbnQiCg==
+name: Tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -v
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      # Ubuntu 24.04 (ubuntu-latest) restricts unprivileged user namespaces via
+      # AppArmor for unconfined processes, which bubblewrap needs. Grant ONLY
+      # /usr/bin/bwrap a scoped AppArmor profile carrying the userns rule; the
+      # global restriction stays in force for everything else (no sysctl change).
+      - name: scoped AppArmor userns profile for bwrap
+        run: |
+          printf 'abi <abi/4.0>,\ninclude <tunables/global>\n\nprofile bwrap /usr/bin/bwrap flags=(unconfined) {\n  userns,\n}\n' | sudo tee /etc/apparmor.d/bwrap
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap
+      # Non-gating diagnostics: which runner image, restriction state (default 1
+      # now that CI no longer relaxes it), and plain-userns vs profiled-bwrap probes.
+      - name: diagnose runner userns and loopback
+        continue-on-error: true
+        run: |
+          cat /etc/os-release
+          sysctl kernel.apparmor_restrict_unprivileged_userns
+          unshare -rn ip link set lo up && echo UNSHARE-LO-OK || echo UNSHARE-LO-FAIL
+          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-net true && echo BWRAP-MIN-OK || echo BWRAP-MIN-FAIL
+      - run: pip install playwright h2 && python -m playwright install chromium --with-deps
+      # Live isolation suite with explicitly installed capabilities: a missing
+      # capability here must FAIL (GROK_REQUIRE_LIVE_BROWSE_CAPS=1), never skip.
+      - run: GROK_REQUIRE_LIVE_BROWSE_CAPS=1 python -m unittest test_vetproxy test_agent_browse -v
+      - run: python -m py_compile webui.py agent_loop.py bot.py task_harness.py grokbot/*.py grokbot/tools/*.py grokbot/gateway/*.py
+      - run: for f in test_*.cjs; do node "$f" || exit 1; done
+      - run: python -m grokbot exec --mock --workspace /tmp/ci-ws -q "smoke" | grep -q "(mock) got your message"
+      - name: wheel smoke (pip install . must ship gateway + web assets)
+        run: |
+          python -m venv /tmp/pkgenv
+          /tmp/pkgenv/bin/pip install -q .
+          cd /tmp
+          /tmp/pkgenv/bin/python -c "import grokbot.gateway.telegram, webui; c = webui.app.test_client(); assert c.get('/').status_code == 200; assert c.get('/static/app.js').status_code == 200; print('wheel smoke OK')"
+      - run: |
+          python -m grokbot exec --mock --workspace /tmp/ci-ws -q '!tool delegate {"task": "say hi", "max_steps": 1}' | grep -q "Sub-agent"
