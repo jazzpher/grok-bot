@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Memory supersession (bitemporal corrections).** Memories can carry a fact key
+  (subject/environment/attribute), `effective_from` (when the fact became true) and `recorded_at`
+  (when it was learned). `save(..., supersedes=<id>)` and a new `supersede_memory` tool replace a
+  fact while keeping the old value in `history(owner, subject, environment, attribute)`; search,
+  `relevant()` and the pinned-injection step only return facts current *now*, so a future-dated
+  correction never hides its predecessor early, a backdated correction fixes history without
+  replacing the current value, and same-key facts saved without a link stay visible with an
+  advisory `candidate_supersedes` flag. Superseded rows no longer count against the 2000-per-owner
+  budget; ambiguous, candidate-flagged and future-dated rows still do. Deleting a replacement
+  restores its predecessor. Existing databases migrate in place (old rows are dated at `created`);
+  `update()` keeps its legacy in-place overwrite semantics. Nothing is auto-superseded, pruned or
+  deleted: `forget_memory` remains the only delete, now documented for wrong facts only.
+
 Verifiable agent loops: pixel-diff and command verifiers gate task completion.
 
 ### Added
@@ -76,7 +91,7 @@ Reliability pack: real cancellation, per-run log, backup/restore, optional edit 
   itself already happened). The netguard's DNS lookup is separate from Chromium's own, so DNS rebinding is left
   to Chromium's built-in local-network checks. Keep the feature off except on a trusted machine until a
   vetting-proxy fix lands (see docs/LIMITATIONS.md). No typing exists, the browser context is ephemeral (no
-  cookies, profile or saved logins) and downloads are never accepted; the Play wright driver and Chromium start
+  cookies, profile or saved logins) and downloads are never accepted; the Playwright driver and Chromium start
   from a scrubbed environment (no API keys or tokens); each browse action has a wall-clock limit after which the
   browser is killed; screenshots reach the model labelled as untrusted page content; at most
   `GROK_AGENT_BROWSER_MAX_ACTIONS` (default 8) browse actions per turn; Chromium is killed at turn end.
@@ -154,4 +169,4 @@ a local-provider preset, images, skills export/import, and the new web UI.
 ## [0.8.x] - 2026-10-12 … 2026-10-16
 
 Model catalog discovery, provider pickers and manual fallback, durable background tasks
-with explicit artifact checks and resume, document/PDF/DOCX tooling.
+with explicit artifact checks and resume, document/PDF/DOCX tooling. 
