@@ -1040,7 +1040,7 @@ function showPanel(id, on) {
   for (const pid of ['memoryPanel', 'schedulePanel', 'skillsPanel']) { const p = document.getElementById(pid); if (p) p.hidden = pid === id ? !on : true; }
 }
 async function refreshMemoryCount() {
-  try { const res = await fetch('/memories'); if (!res.ok) return; const rows = await res.json(); const c = document.getElementById('memcount'); if (c) c.textContent = rows.length ? String(rows.length) : ''; } catch (_) { /* ignore */ }
+  try { const res = await fetch('/memories'); if (!res.ok) return; const rows = await res.json(); const n = rows.filter(r => r.is_current !== false).length; const c = document.getElementById('memcount'); if (c) c.textContent = n ? String(n) : ''; } catch (_) { /* ignore */ }
 }
 async function toggleMemory() {
   const panel = document.getElementById('memoryPanel'); if (!panel) return;
@@ -1048,18 +1048,24 @@ async function toggleMemory() {
   if (open) refreshMemories();
 }
 function memoryRow(m) {
-  const row = el('div', 'item' + (m.pinned ? ' pinned' : ''));
+  const stale = m.is_current === false;
+  const row = el('div', 'item' + (m.pinned ? ' pinned' : '') + (stale ? ' stale' : ''));
   const text = el('div', 'itext', (m.pinned ? '📌 ' : '') + m.text);
-  const meta = el('div', 'imeta', (m.tags || []).join(', ') + (m.source ? ' · ' + m.source : ''));
+  const state = stale ? (m.superseded_by ? ' · superseded (history)' : ' · not current') : '';
+  const meta = el('div', 'imeta', (m.tags || []).join(', ') + (m.source ? ' · ' + m.source : '') + state);
   const acts = el('div', 'iacts');
   const mk = (label, fn) => { const b = el('button', '', label); b.addEventListener('click', fn); acts.appendChild(b); };
-  mk(m.pinned ? 'Unpin' : 'Pin', async () => { await fetch('/memories/' + m.id, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({pinned: !m.pinned})}); refreshMemories(); });
-  mk('Edit', async () => {
-    const next = typeof prompt === 'function' ? prompt('Edit memory', m.text) : null; if (next === null || !next.trim()) return;
-    const res = await fetch('/memories/' + m.id, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text: next})});
-    document.getElementById('memstatus').textContent = res.ok ? 'Updated.' : await res.text(); refreshMemories();
+  if (!stale) {
+    mk(m.pinned ? 'Unpin' : 'Pin', async () => { await fetch('/memories/' + m.id, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({pinned: !m.pinned})}); refreshMemories(); });
+    mk('Edit', async () => {
+      const next = typeof prompt === 'function' ? prompt('Edit memory', m.text) : null; if (next === null || !next.trim()) return;
+      const res = await fetch('/memories/' + m.id, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text: next})});
+      document.getElementById('memstatus').textContent = res.ok ? 'Updated.' : await res.text(); refreshMemories(); });
+  }
+  mk('Forget', async () => {
+    const res = await fetch('/memories/' + m.id + '/delete', {method: 'POST'});
+    document.getElementById('memstatus').textContent = res.ok ? '' : await res.text(); refreshMemories();
   });
-  mk('Forget', async () => { await fetch('/memories/' + m.id + '/delete', {method: 'POST'}); refreshMemories(); });
   row.append(text, meta, acts);
   return row;
 }
@@ -1072,7 +1078,7 @@ async function refreshMemories() {
     list.replaceChildren();
     if (!rows.length) list.appendChild(el('div', 'muted', q ? 'No matches.' : 'No memories yet. Tell the agent "remember that …" or add one above.'));
     for (const m of rows) list.appendChild(memoryRow(m));
-    const c = document.getElementById('memcount'); if (c && !q) c.textContent = rows.length ? String(rows.length) : '';
+    const c = document.getElementById('memcount'); if (c && !q) { const n = rows.filter(r => r.is_current !== false).length; c.textContent = n ? String(n) : ''; }
   } catch (e) { document.getElementById('memstatus').textContent = e.message; }
 }
 async function addMemory(textArg) {

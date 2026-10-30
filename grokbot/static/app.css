@@ -260,3 +260,4 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
 /* preview_page screenshot card */
 .toolcard.preview img.previewshot { display: block; max-width: 100%; height: auto; margin: 8px 12px 12px; border: 1px solid var(--line, #333); border-radius: 6px; }
+.item.stale { opacity: .55; }

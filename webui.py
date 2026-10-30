@@ -1528,7 +1528,11 @@ def memory_update(mid):
 
 @app.route('/memories/<mid>/delete', methods=['POST'])
 def memory_delete(mid):
-    if not memory_store().delete(session['sid'], mid):
+    try:
+        gone = memory_store().delete(session['sid'], mid)
+    except ValueError as exc:
+        return Response(str(exc), status=400)
+    if not gone:
         return Response('No such memory.', status=404)
     return json_response({'ok': True})
 

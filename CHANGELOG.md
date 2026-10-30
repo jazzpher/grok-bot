@@ -6,6 +6,29 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Memory supersession (bitemporal corrections).** Memories can carry a fact key
+  (subject/environment/attribute), `effective_from` (when the fact became true) and `recorded_at`
+  (when it was learned). `save(..., supersedes=<id>)` and a new `supersede_memory` tool replace a
+  fact while keeping the old value in `history(owner, subject, environment, attribute)`; search,
+  `relevant()` and the pinned-injection step only return facts current *now*, so a future-dated
+  correction never hides its predecessor early, a backdated correction fixes history without
+  replacing the current value, and same-key facts saved without a link stay visible with an
+  advisory `candidate_supersedes` flag. Keyless or partially-keyed facts never hide one another.
+  Rows replaced by an already-effective successor no longer count against the 2000-per-owner budget;
+  predecessors of future-dated corrections (still active), ambiguous, candidate-flagged and
+  backdated rows still do. Deleting the newest value in a chain restores its predecessor; deleting a
+  mid-chain row is refused so no old value is silently resurrected. Text edits on superseded rows are
+  refused so history cannot be rewritten (`update()` keeps its legacy overwrite semantics for live
+  rows). An explicit link dominates backdate grouping, so an explicit replacement effective earlier
+  than its target stays visible instead of vanishing with it, and a keyed row can only be replaced
+  under the same key (a fully keyless legacy row may be superseded under a new key, which then
+  defines the chain). The memory panel marks superseded/history entries (pin/edit actions are only
+  offered on current rows) and counts only current memories. Existing databases migrate in place
+  (old rows are dated at `created`). Nothing is auto-superseded, pruned or
+  deleted: `forget_memory` remains the only delete, now documented for wrong facts only.
+
 Verifiable agent loops: pixel-diff and command verifiers gate task completion.
 
 ### Added
