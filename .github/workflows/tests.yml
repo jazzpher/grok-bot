@@ -13,6 +13,11 @@ jobs:
           node-version: '20'
       - run: pip install -r requirements.txt
       - run: python -m unittest discover -v
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - run: pip install playwright h2 && python -m playwright install chromium --with-deps
+      # Live isolation suite with explicitly installed capabilities: a missing
+      # capability here must FAIL (GROK_REQUIRE_LIVE_BROWSE_CAPS=1), never skip.
+      - run: GROK_REQUIRE_LIVE_BROWSE_CAPS=1 python -m unittest test_vetproxy test_agent_browse -v
       - run: python -m py_compile webui.py agent_loop.py bot.py task_harness.py grokbot/*.py grokbot/tools/*.py grokbot/gateway/*.py
       - run: for f in test_*.cjs; do node "$f" || exit 1; done
       - run: python -m grokbot exec --mock --workspace /tmp/ci-ws -q "smoke" | grep -q "(mock) got your message"
