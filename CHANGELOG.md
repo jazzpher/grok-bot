@@ -21,8 +21,12 @@ All notable changes to this project are documented here. The format follows
   backdated rows still do. Deleting the newest value in a chain restores its predecessor; deleting a
   mid-chain row is refused so no old value is silently resurrected. Text edits on superseded rows are
   refused so history cannot be rewritten (`update()` keeps its legacy overwrite semantics for live
-  rows). The memory panel marks superseded/history entries and counts only current memories. Existing
-  databases migrate in place (old rows are dated at `created`). Nothing is auto-superseded, pruned or
+  rows). An explicit link dominates backdate grouping, so an explicit replacement effective earlier
+  than its target stays visible instead of vanishing with it, and a keyed row can only be replaced
+  under the same key (a fully keyless legacy row may be superseded under a new key, which then
+  defines the chain). The memory panel marks superseded/history entries (pin/edit actions are only
+  offered on current rows) and counts only current memories. Existing databases migrate in place
+  (old rows are dated at `created`). Nothing is auto-superseded, pruned or
   deleted: `forget_memory` remains the only delete, now documented for wrong facts only.
 
 Verifiable agent loops: pixel-diff and command verifiers gate task completion.
