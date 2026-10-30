@@ -1055,12 +1055,13 @@ function memoryRow(m) {
   const meta = el('div', 'imeta', (m.tags || []).join(', ') + (m.source ? ' · ' + m.source : '') + state);
   const acts = el('div', 'iacts');
   const mk = (label, fn) => { const b = el('button', '', label); b.addEventListener('click', fn); acts.appendChild(b); };
-  mk(m.pinned ? 'Unpin' : 'Pin', async () => { await fetch('/memories/' + m.id, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({pinned: !m.pinned})}); refreshMemories(); });
-  mk('Edit', async () => {
-    const next = typeof prompt === 'function' ? prompt('Edit memory', m.text) : null; if (next === null || !next.trim()) return;
-    const res = await fetch('/memories/' + m.id, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text: next})});
-    document.getElementById('memstatus').textContent = res.ok ? 'Updated.' : await res.text(); refreshMemories();
-  });
+  if (!stale) {
+    mk(m.pinned ? 'Unpin' : 'Pin', async () => { await fetch('/memories/' + m.id, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({pinned: !m.pinned})}); refreshMemories(); });
+    mk('Edit', async () => {
+      const next = typeof prompt === 'function' ? prompt('Edit memory', m.text) : null; if (next === null || !next.trim()) return;
+      const res = await fetch('/memories/' + m.id, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text: next})});
+      document.getElementById('memstatus').textContent = res.ok ? 'Updated.' : await res.text(); refreshMemories(); });
+  }
   mk('Forget', async () => {
     const res = await fetch('/memories/' + m.id + '/delete', {method: 'POST'});
     document.getElementById('memstatus').textContent = res.ok ? '' : await res.text(); refreshMemories();
