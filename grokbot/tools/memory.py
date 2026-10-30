@@ -67,7 +67,11 @@ def register(registry):
                    {'type': 'object', 'properties': {'id': {'type': 'string'}}, 'required': ['id']},
                    category='memory', mutates=True, available=has_memory)
     def forget_memory(ctx, id):
-        if not ctx.extras['memory'].delete(_owner(ctx), id):
+        try:
+            gone = ctx.extras['memory'].delete(_owner(ctx), id)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        if not gone:
             raise ToolError('No memory with that id.')
         return 'Forgot memory ' + id + '.'
 
