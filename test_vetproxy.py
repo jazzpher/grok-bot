@@ -30,6 +30,33 @@ def _playwright_importable():
     return True
 
 
+_REQUIRE_CAPS = os.environ.get('GROK_REQUIRE_LIVE_BROWSE_CAPS') == '1'
+# GROK_REQUIRE_LIVE_BROWSE_CAPS=1 (set by jobs that install the capabilities on purpose)
+# implies the live suite and turns every capability skip below into a hard failure.
+_LIVE = os.environ.get('GROK_LIVE_BROWSE_TESTS') == '1' or _REQUIRE_CAPS
+
+
+def _cap_gate(condition, reason):
+    """skipUnless(condition), but a hard failure when the job explicitly requires the capability."""
+    if condition or not _REQUIRE_CAPS:
+        return unittest.skipUnless(condition, reason)
+
+    def fail_instead(fn):
+        def wrapper(self, *args, **kwargs):
+            self.fail('required live-browse capability missing: ' + reason)
+        return wrapper
+
+    def deco(target):
+        if isinstance(target, type):
+            for name, member in list(vars(target).items()):
+                if name.startswith('test') and callable(member):
+                    setattr(target, name, fail_instead(member))
+            return target
+        return fail_instead(target)
+
+    return deco
+
+
 GOOD = 'good.test'
 OTHER = 'other.test'
 LOCAL = ipaddress.ip_address('127.0.0.1')
@@ -244,7 +271,7 @@ class WebSocketGateTests(unittest.TestCase):
 
 
 class IsolationWrapperTests(unittest.TestCase):
-    @unittest.skipUnless(browser_isolation.available(), 'needs bubblewrap')
+    @_cap_gate(browser_isolation.available(), 'needs bubblewrap')
     def test_no_direct_egress_inside_namespace(self):
         """Structural proof: a plain process inside the same isolation cannot reach the network."""
         target = None
@@ -271,7 +298,7 @@ class IsolationWrapperTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn('blocked:', result.stdout, result.stdout + result.stderr)
 
-    @unittest.skipUnless(browser_isolation.available(), 'needs bubblewrap')
+    @_cap_gate(browser_isolation.available(), 'needs bubblewrap')
     def test_loopback_relay_path_exists(self):
         """The namespace keeps a working loopback (the relay's listen side)."""
         result = subprocess.run(
@@ -341,8 +368,7 @@ class ProductionGuardTests(unittest.TestCase):
                       proxy.drain_denials())
 
 
-@unittest.skipUnless(os.environ.get('GROK_LIVE_BROWSE_TESTS') == '1',
-                     'live Chromium test: set GROK_LIVE_BROWSE_TESTS=1 (needs playwright, chromium, bwrap)')
+@_cap_gate(_LIVE, 'live Chromium test needs playwright, chromium, bwrap')
 class LiveIsolatedBrowseTests(unittest.TestCase):
     """Real Chromium, real isolation: every attack scenario asserts the request NEVER fires,
     not just that the landed page is blanked afterwards."""
@@ -526,8 +552,7 @@ def _have_h2():
         return False
 
 
-@unittest.skipUnless(os.environ.get('GROK_LIVE_BROWSE_TESTS') == '1' and _have_h2(),
-                     'live HTTP/2 test: set GROK_LIVE_BROWSE_TESTS=1 (needs playwright, chromium, bwrap, h2)')
+@_cap_gate(_LIVE and _have_h2(), 'live HTTP/2 test needs playwright, chromium, bwrap, h2')
 class LiveH2CoalescingTests(unittest.TestCase):
     """HTTP/2 approval-boundary tests over real TLS+h2 (the protocol with cross-origin
     connection reuse). Every assertion measures DESTINATION hits and proxy vetoes, never
@@ -794,8 +819,7 @@ def _start_h2_server(cert, key, host_a, host_b):
     return port, hits, stop
 
 
-@unittest.skipUnless(os.environ.get('GROK_LIVE_BROWSE_TESTS') == '1',
-                     'live wrapper test: set GROK_LIVE_BROWSE_TESTS=1 (needs bwrap)')
+@_cap_gate(_LIVE, 'live wrapper test needs bwrap')
 class LiveWrapperTests(unittest.TestCase):
     """The PRODUCTION wrapper itself (browser_isolation.write_wrapper), not a hand-rolled
     bwrap: namespace contents, canary non-visibility, relay path, abstract sockets."""
@@ -940,6 +964,10 @@ class LiveWrapperTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr[:300])
         self.assertIn('pong:ping', result.stdout, result.stdout + result.stderr[:300])
 
+class ResourceLifecycleTests(unittest.TestCase):
+    """No Chromium process, proxy thread, or wrapper directory is left behind when a
+    session cannot start, or after a clean close."""
+
     def test_missing_bwrap_refuses_browser_start(self):
         """No bwrap -> available() False -> the session raises instead of falling back."""
         from grokbot import browser_isolation
@@ -971,12 +999,6 @@ class LiveWrapperTests(unittest.TestCase):
             sp.run = original
             browser_isolation.available(refresh=True)
 
-
-
-class ResourceLifecycleTests(unittest.TestCase):
-    """No Chromium process, proxy thread, or wrapper directory is left behind when a
-    session cannot start, or after a clean close."""
-
     def _proc_count(self, needle):
         count = 0
         for pid in os.listdir('/proc'):
@@ -990,11 +1012,12 @@ class ResourceLifecycleTests(unittest.TestCase):
                 pass
         return count
 
-    @unittest.skipUnless(_playwright_importable(), 'needs playwright installed')
+    @_cap_gate(_playwright_importable(), 'needs playwright installed')
     def test_session_refusal_leaves_no_resources(self):
         from grokbot import agent_browser
         from grokbot.browser_isolation import WRAPPER_PREFIX
         chromium_before = self._proc_count('chromium')
+        drivers_before = self._proc_count('playwright/driver')
         entries_before = {e for e in os.listdir(tempfile.gettempdir())
                           if e.startswith(WRAPPER_PREFIX)}
         with unittest.mock.patch('grokbot.browser_isolation.available', return_value=False):
@@ -1009,9 +1032,13 @@ class ResourceLifecycleTests(unittest.TestCase):
                          'chromium processes left behind')
         self.assertIsNone(session._proxy, 'vetting proxy left running')
         self.assertIsNone(session._browser)
+        self.assertIsNone(session._pw, 'playwright driver left running after refusal')
+        self.assertIsNone(session._driver_pid)
+        self.assertEqual(drivers_before, self._proc_count('playwright/driver'),
+                         'playwright driver processes left behind')
 
     def test_close_leaves_no_chromium_processes(self):
-        if not os.environ.get('GROK_LIVE_BROWSE_TESTS'):
+        if not _LIVE:
             self.skipTest('needs isolation (GROK_LIVE_BROWSE_TESTS=1)')
         from grokbot.agent_browser import AgentBrowserSession
         real_getaddrinfo = socket.getaddrinfo
@@ -1177,7 +1204,7 @@ class DenialSplitTests(unittest.TestCase):
                             'rebinding must never be reported as approval-fixable')
 
 
-@unittest.skipUnless(browser_isolation.available(), 'needs bubblewrap')
+@_cap_gate(browser_isolation.available(), 'needs bubblewrap')
 class LiveSandboxHardeningTests(unittest.TestCase):
     """Measured hardening properties of the PRODUCTION wrapper: effective capabilities,
     session isolation, SysV IPC isolation. Test-created canaries only."""
