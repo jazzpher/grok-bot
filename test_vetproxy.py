@@ -870,8 +870,15 @@ class LiveWrapperTests(unittest.TestCase):
         self.addCleanup(lambda: os.path.exists(sock_path) and os.unlink(sock_path))
         pkg_dir = os.path.dirname(os.path.abspath(browser_isolation.__file__))
         top = pkg_dir.split(os.sep)[1]                       # first path component, e.g. 'downloads'
+        # Disposable canary next to the checkout (on CI that tree IS under /home):
+        # host content beside the deliberate isorelay.py bind must stay invisible.
+        home_canary = os.path.join(os.path.dirname(pkg_dir), 'grok-home-canary-%d' % os.getpid())
+        with open(home_canary, 'w') as fh:
+            fh.write('canary')
+        self.addCleanup(os.unlink, home_canary)
         result, _iso = self._run_wrapper(lambda iso:
             'test -e %s && echo TMP-FILE-LEAK;\n'
+            'test -e %s && echo HOME-CANARY-LEAK;\n'
             'test -e /etc/machine-id && echo ETC-LEAK;\n'
             'python3 -c "import socket;s=socket.socket(socket.AF_UNIX);s.settimeout(3);'
             's.connect(\'%s\')" 2>&1 | tail -1;\n'
@@ -880,9 +887,10 @@ class LiveWrapperTests(unittest.TestCase):
             'echo ---;\n'
             'find /%s -path %s -prune -o -print;\n'
             'echo ---;\n'
-            'ls /' % (canary, sock_path, pkg_dir, top, iso.dir))
+            'ls /' % (canary, home_canary, sock_path, pkg_dir, top, iso.dir))
         self.assertEqual(result.returncode, 0, result.stderr[:300])
         self.assertNotIn('TMP-FILE-LEAK', result.stdout)
+        self.assertNotIn('HOME-CANARY-LEAK', result.stdout)
         self.assertNotIn('ETC-LEAK', result.stdout)
         # The socket canary is absent inside: connect must fail, never succeed silently.
         self.assertRegex(result.stdout.split('---')[0],
@@ -903,7 +911,13 @@ class LiveWrapperTests(unittest.TestCase):
         self.assertLessEqual(root_tokens,
                              {'bin', 'dev', 'etc', 'lib', 'lib64', 'proc', 'run', 'sbin',
                               'tmp', 'usr', top}, root_tokens)
-        self.assertNotIn('home', root_tokens)
+        # Host /home must never leak into the sandbox root. When the package itself
+        # lives under /home (CI checkout at /home/runner/work/...), the visible /home
+        # is only the auto-created empty mount parent for the deliberate isorelay.py
+        # bind; the exact chain assertion above (no siblings anywhere along the path)
+        # is what proves there is no real host /home exposure in that case.
+        if top != 'home':
+            self.assertNotIn('home', root_tokens)
 
     def test_abstract_unix_socket_isolated_with_netns(self):
         """Abstract unix sockets live in the network namespace: a host-side abstract
