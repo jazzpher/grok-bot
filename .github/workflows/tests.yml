@@ -14,6 +14,9 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python -m unittest discover -v
       - run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      # Ubuntu 24.04 (ubuntu-latest) restricts unprivileged user namespaces
+      # via AppArmor, which bubblewrap needs. Lift it before the live suite.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: pip install playwright h2 && python -m playwright install chromium --with-deps
       # Live isolation suite with explicitly installed capabilities: a missing
       # capability here must FAIL (GROK_REQUIRE_LIVE_BROWSE_CAPS=1), never skip.
