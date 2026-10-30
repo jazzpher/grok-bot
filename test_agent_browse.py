@@ -284,8 +284,10 @@ class _Server(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
-@unittest.skipUnless(__import__('os').environ.get('GROK_LIVE_BROWSE_TESTS') == '1',
-                     'live Chromium test: set GROK_LIVE_BROWSE_TESTS=1 with playwright + chromium installed')
+from test_vetproxy import _cap_gate, _LIVE, _REQUIRE_CAPS
+
+
+@_cap_gate(_LIVE, 'live Chromium test needs playwright + chromium installed')
 class LiveChromiumTests(unittest.TestCase):
     """Real Playwright pass against a local server, reached through a fake PUBLIC hostname
     (Chromium --host-resolver-rules maps it to 127.0.0.1; Python DNS is patched to return a
@@ -313,6 +315,8 @@ class LiveChromiumTests(unittest.TestCase):
     def setUp(self):
         from grokbot import browser_isolation
         if not browser_isolation.available():
+            if _REQUIRE_CAPS:
+                self.fail('required live-browse capability missing: bubblewrap (bwrap)')
             self.skipTest('isolated browsing needs bubblewrap (bwrap)')
         real_getaddrinfo = socket.getaddrinfo
 
