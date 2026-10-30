@@ -19,8 +19,15 @@ stored flag can never hide a predecessor before a future-dated correction activa
 1. its ``effective_from`` <= T (future-dated facts are not current yet);
 2. it is not superseded by a row whose ``effective_from`` <= T (explicit replacement, applied only
    once the replacement is in effect);
-3. no same-key row has a strictly later ``effective_from`` that was *recorded earlier* (a backdated
-   correction fixes history without silently replacing the current value).
+3. no same-key row outside its own explicit supersession chain has a strictly later
+   ``effective_from`` that was *recorded earlier* (an unlinked backdated correction fixes history
+   without silently replacing the current value; an explicit ``supersedes`` link always wins over
+   the rows it replaces, even when the replacement is effective earlier than its target).
+
+An explicit ``supersedes`` link on a keyed target requires the same full key (subject,
+environment, attribute) on the new row, so a correction can never split a fact's history across
+keys. A fully keyless target (legacy rows) may be superseded under any key; the new key defines
+the chain from then on.
 
 Currentness filtering runs identically in ``search`` (FTS and LIKE fallback) and ``relevant``
 (including the pinned step), before any LIMIT/top-k. ``history`` returns the full key chain,
@@ -140,7 +147,9 @@ class MemoryStore:
         """SQL fragment: row <alias> is current at :now. See module docstring for the three rules.
         Rule 3 only relates fully-keyed rows (keyless/partial-key facts never hide each other), and
         still applies when the later-effective row was itself superseded, so a stale backdated fact
-        cannot resurface after its newer fact is replaced."""
+        cannot resurface after its newer fact is replaced. An explicit supersedes chain dominates
+        rule 3: a row is never hidden by a chain ancestor it explicitly replaces, so an explicit
+        backdated correction (new row effective earlier than its target) stays visible."""
         a = alias
         same_key = ' AND '.join('(y.{c} = {a}.{c} OR (y.{c} IS NULL AND {a}.{c} IS NULL))'.format(a=a, c=c)
                                 for c in ('subject', 'environment', 'attribute'))
@@ -151,7 +160,14 @@ class MemoryStore:
                 '   AND EXISTS (SELECT 1 FROM memories y WHERE y.owner = {a}.owner AND y.id != {a}.id'
                 '   AND ' + same_key +
                 '   AND y.effective_from > {a}.effective_from AND y.recorded_at < {a}.recorded_at'
-                '   AND y.effective_from <= :now))').format(a=a)
+                '   AND y.effective_from <= :now'
+                # An explicit supersedes link dominates the backdated grouping: rows this row
+                # replaces (its chain ancestors) never hide it, whatever the effective order.
+                '   AND y.id NOT IN (WITH RECURSIVE anc(id) AS ('
+                '       SELECT id FROM memories WHERE superseded_by = {a}.id'
+                '       UNION ALL'
+                '       SELECT s.id FROM memories s JOIN anc a2 ON s.superseded_by = a2.id)'
+                '       SELECT id FROM anc)))').format(a=a)
 
     @classmethod
     def _select_current(cls, alias='m'):
@@ -205,6 +221,13 @@ class MemoryStore:
                     raise ValueError('No memory with id %s for this owner.' % supersedes)
                 if target['superseded_by'] is not None:
                     raise ValueError('Memory %s is already superseded by %s.' % (supersedes, target['superseded_by']))
+                tkey = (target['subject'], target['environment'], target['attribute'])
+                if tkey != (subject, environment, attribute) and any(tkey):
+                    # A keyed target may only be replaced under the SAME key, so a correction can
+                    # never split a fact's history across keys. A fully keyless target (legacy
+                    # rows) may be superseded under any key: the new row's key defines the chain.
+                    raise ValueError('Memory %s has a different (subject, environment, attribute) key;'
+                                     ' supersession stays within one fact key.' % supersedes)
             # Budget: rows replaced by an already-effective successor no longer count. A predecessor
             # whose replacement is future-dated still counts (it is still the active fact), and
             # ambiguous/candidate/backdated rows count too, so no transition evades the budget.
