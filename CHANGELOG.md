@@ -15,10 +15,14 @@ All notable changes to this project are documented here. The format follows
   `relevant()` and the pinned-injection step only return facts current *now*, so a future-dated
   correction never hides its predecessor early, a backdated correction fixes history without
   replacing the current value, and same-key facts saved without a link stay visible with an
-  advisory `candidate_supersedes` flag. Superseded rows no longer count against the 2000-per-owner
-  budget; ambiguous, candidate-flagged and future-dated rows still do. Deleting a replacement
-  restores its predecessor. Existing databases migrate in place (old rows are dated at `created`);
-  `update()` keeps its legacy in-place overwrite semantics. Nothing is auto-superseded, pruned or
+  advisory `candidate_supersedes` flag. Keyless or partially-keyed facts never hide one another.
+  Rows replaced by an already-effective successor no longer count against the 2000-per-owner budget;
+  predecessors of future-dated corrections (still active), ambiguous, candidate-flagged and
+  backdated rows still do. Deleting the newest value in a chain restores its predecessor; deleting a
+  mid-chain row is refused so no old value is silently resurrected. Text edits on superseded rows are
+  refused so history cannot be rewritten (`update()` keeps its legacy overwrite semantics for live
+  rows). The memory panel marks superseded/history entries and counts only current memories. Existing
+  databases migrate in place (old rows are dated at `created`). Nothing is auto-superseded, pruned or
   deleted: `forget_memory` remains the only delete, now documented for wrong facts only.
 
 Verifiable agent loops: pixel-diff and command verifiers gate task completion.
